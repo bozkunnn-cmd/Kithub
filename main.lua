@@ -1,8 +1,9 @@
 --[[
-KITKIT HUB v2.3 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.4 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
-remote loader, speculative purchase remotes, auto-craft, paid summons or auto-rolls.
+remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
+Quest and crafting requests are subject to server verification and may fail.
 Rod buying uses game UI ONLY, targets one shop rod per island, and verifies ownership.
 UI access and purchases are not guaranteed. Live behavior is untested.
 
@@ -45,13 +46,18 @@ if type(env.KITKIT_HeavyweightFishing) == "table" and type(env.KITKIT_Heavyweigh
     pcall(function() env.KITKIT_HeavyweightFishing:Unload() end)
 end
 
-local hub = { running = true, connections = {}, esp = {}, touched = {}, originals = {} }
+local hub = { running = true, connections = {}, esp = {}, touched = {}, originals = {}, manualTravelUntil=0 }
 env.KITKIT_HeavyweightFishing = hub
 
 local state = {
     autoLevel = false, autoRoute = true, autoFavorite = true,
     autoBuyRod = true, autoSeaFacing = true,
     autoCodes = true, autoDailyQuest = true,
+    autoQuests = false, autoTicketQuests = false, autoZengQuest = false,
+    autoSageAfterAmber = true, ticketQuestMode = "Easy",
+    autoCraftRod = false, autoFarmMaterials = false, autoCraftBait = false,
+    protectMaterials = true, craftTarget = "Heavenpiercer Rod",
+    merchantAlerts = true,
     fastSell = false, targetLevel = 500,
     autoCast = false, autoReel = false, lockBar = false,
     autoSkill = false, slam = false, charge = false,
@@ -95,6 +101,7 @@ local codesAttempted = {}
 local lastDailyQuestClaim = 0
 local lastRodPrompt = ""
 local favoriteAttempts = {}
+local isCraftIngredient -- populated by the verified recipe engine (declared later)
 local routeCooldownUntil = {}
 local recoveryAttempts = 0
 local catchesThisSession = 0
@@ -128,7 +135,7 @@ local ISLANDS = {
     {"Weather Isle", -2886.12, 6.76, 1199.79},
     {"Mystic Reef Isle", -2561.58, 9.28, -1288.64},
 }
--- v2.3: retain the sea-facing orientation from the public StarCrow island
+-- v2.4: retain the sea-facing orientation from the public StarCrow island
 -- farm CFrames. v2.2 accidentally copied coordinates but dropped this rotation.
 -- The sea raycast below validates and adjusts this orientation when possible.
 local FARM_CFRAMES = {
@@ -686,15 +693,27 @@ local function tryFavorite(item)
 end
 local function maySell()
     local inv,count,maximum=getInventory()
-    -- For a fresh-account XP grind the game may omit replicated bag data.
-    -- A timed "All" attempt is still possible, but is marked UNVERIFIED.
+    -- Craft protection always requires server-replicated inventory data.
     if not inv then
+        if state.protectMaterials and (state.autoFarmMaterials or state.autoCraftRod) then
+            return false,"No inventory data; cannot protect crafting fish"
+        end
         if state.protectRare and not state.fastSell then
             return false,"No inventory data to check rare fish"
         end
         return true,"Blind timed sale; inventory not replicated"
     end
     if count==0 then return false,"Nothing to sell" end
+    -- Sell All does NOT sell favorites, but do not send it until every
+    -- crafting ingredient has confirmed favorite status in replicated data.
+    if state.protectMaterials then
+        for _,item in ipairs(inv:GetChildren()) do
+            if isCraftIngredient and isCraftIngredient(item) and not isFavorite(item) then
+                tryFavorite(item)
+                return false,"Craft fish not favorited yet: "..item.Name
+            end
+        end
+    end
     if state.sellNearFull and (not maximum or maximum<=0 or count/maximum<0.88) then
         return false,"Bag below 88% or limit unknown"
     end
@@ -852,7 +871,7 @@ local function startBoss(name)
     return started
 end
 
--- v2.3 guarded UI-driven rod purchasing. We do not guess/forge an
+-- v2.4 guarded UI-driven rod purchasing. We do not guess/forge an
 -- undocumented purchase RemoteEvent or invoke a random remote with Cash.
 -- The in-game shop must expose an exact matching rod name and Buy button.
 local function isShopping()
@@ -1107,6 +1126,7 @@ local function finishRodShop(reason,delay)
 end
 local function shopTick()
     if not hub.running or not state.autoLevel or not state.autoBuyRod then return end
+    if os.clock()<(hub.manualTravelUntil or 0) then return end
     local now=os.clock()
     local p=profile()
     if rodShop.phase=="cooldown" then
@@ -1233,6 +1253,766 @@ local function shopTick()
         end
     end
 end
+local ext=(function()
+-- v2.4 progression and quest/craft engine. Only server-replicated data may
+-- confirm purchases, quests or crafts. Research URLs are in the patch notes.
+local questTracker = {status="Idle", sage="waiting", sageRoute=nil, nextAt=0,
+    lastInteract=-math.huge, lastTicket=-math.huge, lastUI=-math.huge, ticketStatus="Idle", side="Idle",
+    lastDaily=0, pausedUntil=0, lastSageVisit=0, lastProgress="", lastZeng=-math.huge, zengStatus="OFF", routeLockUntil=0}
+local craftTracker = {status="Idle", route=nil, fish=nil, lastAt=-math.huge,
+    attempts=0, lastBefore=nil, pendingAt=0, lastBaitAt=-math.huge,
+    lastEquipBaitAt=-math.huge, lastSuccessful=nil, fishCount=0}
+local merchantTracker = {Maoshan=nil,Taoist=nil, lastSeen={}, lastScan=-math.huge,
+    alerts=0, seenThisSession={}}
+local QUESTRUN_CATALOG = {
+    {npc="Sage Yijiu",island="Battlefield Isle",reward="Diamond Rod",type="Sage 1",objective="5 catches of at least 1,500,000 kg each"},
+    {npc="Sage Yijiu",island="Battlefield Isle",reward="Phoenix Annihilation Art",type="Sage 2",objective="Phoenix Strive Art v2; 250 catches; 1.5M kg Scarlet and Elder Scarlet, Bamboo Thunderstorm"},
+    {npc="Sage Yijiu",island="Battlefield Isle",reward="Fivefold Ascension",type="Sage 3",objective="2M kg Draconic Koi; Sever The Gate v3; 10 catches of 1M kg"},
+    {npc="Sage Yijiu",island="Battlefield Isle",reward="Tenfold Convergence",type="Sage 4",objective="6M kg Rainbow Dragon Fish; 50 uses of Fivefold Ascension"},
+    {npc="Sage Yijiu",island="Battlefield Isle",reward="One Hook Dominance",type="Sage 5",objective="5M kg Frost Kingfish; 6.5M kg Frost Queen; 100 uses of Tenfold"},
+    {npc="Biao Di",island="Frost Isle",reward="Cryo Gravity Rod",type="Rod quest",objective="100 Frost catches, two 1M+ kg Primordial Kunfish Overlords, four Primordial Kunfish"},
+    {npc="Biao Di",island="Coconut Isle",reward="Soul Thorn Rod",type="Rod quest",objective="Three 1M+ kg Mutated Koid Whales, five Warbringer Sharks, five Dreadscale Groupers"},
+    {npc="Giang Lao",island="Bamboo Isle",reward="Shadowless Taiji Strike",type="NPC",objective="Consult live quest board"},
+    {npc="Giang Lao",island="Battlefield Isle",reward="Ascended Taiji Art",type="NPC",objective="Consult live quest board"},
+    {npc="Ha Dieu De",island="Frost Isle",reward="Sever The Gate v3",type="NPC",objective="Consult live quest board"},
+    {npc="Lao Ngo",island="Battlefield Isle",reward="Heartbreaker Cleave v2",type="NPC",objective="Consult live quest board"},
+    {npc="Blind Grand Angler",island="Battlefield Isle",reward="Astral Grand Art Zenith",type="NPC",objective="Consult live quest board"},
+    {npc="Bac Minh",island="Coconut Isle",reward="Bac Minh Orb",type="NPC",objective="Consult live quest board"},
+    {npc="Ticket Quest Giver",island="Beginning Isle",reward="Easy/Hard Tickets",type="Daily",objective="Replicated objectives; daily limit"},
+    {npc="Zeng Tianguo",island="Beginning Isle",reward="Repeatable quest",type="Repeatable",objective="Objectives vary; consult replicated quest"},
+    {npc="Chu Xin",island="Varies",reward="Divine Rod",type="Main",objective="Live quest details not verified"},
+    {npc="Yaxuo",island="Varies",reward="Unknown Rod",type="Main",objective="Live quest details not verified"},
+}
+local CRAFT_PLAN = {
+    ["Heavenpiercer Rod"] = {
+        cost=50,
+        fish={
+            {name="Flying Fish Emperor",island="Perch Isle",weather="Windy"},
+            {name="Flying Fish Empress",island="Perch Isle",weather="Windy"},
+            {name="Heavenpiercer Turtle",island="Coconut Isle",weather="Foggy"},
+            {name="Rainbow Dragonfish",island=nil,weather=nil,bait="Rainbow Bait"},
+        },
+    },
+    ["Pure Diamond Rod"] = {
+        cost=50,
+        fish={
+            {name="Frost Kingfish",island="Frost Isle",weather="Snowy"},
+            {name="Frost QueenFish",island=nil,weather=nil,bait="Frost Bait"},
+            {name="Sanguine Fish",island="Amber Isle",weather="Blazing Sun"},
+            {name="Draconic Koi",island="Amber Isle",weather="Blazing Sun"},
+        },
+    },
+}
+local function fold(s)
+    return tostring(s or ""):lower():gsub("[^%w]", "")
+end
+local fishDecoder = nil
+local function normalizeFish(item)
+    if not item then return "" end
+    local name=type(item)=="string" and item or item.Name
+    name=tostring(name or "")
+    if not fishDecoder then
+        local cm=ReplicatedStorage:FindFirstChild("ClientModule")
+        local gs=cm and cm:FindFirstChild("GameService")
+        if gs and gs:IsA("ModuleScript") then
+            local ok,mod=pcall(require,gs)
+            if ok and type(mod)=="table" and type(mod.DestringFish)=="function" then
+                fishDecoder=mod.DestringFish
+            end
+        end
+    end
+    if fishDecoder then
+        local ok,decoded=pcall(fishDecoder,name)
+        if ok and type(decoded)=="table" and type(decoded.FishName)=="string" then
+            return fold(decoded.FishName)
+        end
+    end
+    local before=name:match("^([^,|]+)") or name
+    return fold(before)
+end
+local function ownedFishCount(fishName)
+    local inv=getInventory()
+    if not inv then return nil end
+    local count=0
+    for _,item in ipairs(inv:GetChildren()) do
+        if normalizeFish(item)==fold(fishName) then count=count+1 end
+    end
+    return count
+end
+local function recipeForTarget()
+    local n=state.craftTarget
+    return CRAFT_PLAN[n],n
+end
+isCraftIngredient = function(item)
+    if not state.protectMaterials then return false end
+    local recipe=CRAFT_PLAN[state.craftTarget]
+    if not recipe then return false end
+    local name=normalizeFish(item)
+    for _,entry in ipairs(recipe.fish) do
+        if name==fold(entry.name) then return true end
+    end
+    return false
+end
+local function currentWeather()
+    return tostring(workspace:GetAttribute("Weather") or "Unknown")
+end
+local function matchingWeather(got,needed)
+    local a,b=fold(got),fold(needed)
+    if b=="windy" then return a:find("wind",1,true)~=nil end
+    if b=="snowy" then return a:find("snow",1,true)~=nil end
+    if b=="foggy" then return a:find("fog",1,true)~=nil or a:find("mist",1,true)~=nil end
+    if b=="blazingsun" then return a:find("blazing",1,true)~=nil end
+    return a==b
+end
+local function knownFishForWeather()
+    local recipe=CRAFT_PLAN[state.craftTarget]
+    if not recipe then return nil,nil,nil end
+    local weather=currentWeather()
+    local nextUnowned=nil
+    local baitMissing=nil
+    for _,entry in ipairs(recipe.fish) do
+        local owned=ownedFishCount(entry.name)
+        if owned==nil then return nil,nil,"Fish inventory not replicated" end
+        if owned<1 then
+            nextUnowned=nextUnowned or entry
+            if entry.bait then baitMissing=baitMissing or entry end
+            if entry.island and matchingWeather(weather,entry.weather) then
+                return entry.island,entry,"Weather match "..weather
+            end
+        end
+    end
+    if not nextUnowned then return nil,nil,"All four recipe fish present" end
+    if baitMissing then return nil,baitMissing,"Needs "..baitMissing.bait.." (summoned fish)" end
+    return nil,nextUnowned,("Waiting for "..nextUnowned.weather.." on "..nextUnowned.island)
+end
+local function ownedBaitCount(name)
+    local pd=playerData()
+    if not pd then return nil end
+    for _,folderName in ipairs({"Bait","BaitInventory","Inventory"}) do
+        local folder=pd:FindFirstChild(folderName)
+        if folder then
+            for _,obj in ipairs(folder:GetChildren()) do
+                if fold(obj.Name)==fold(name) or fold(obj.Name:match("^([^,|]+)") or obj.Name)==fold(name) then
+                    if obj:IsA("ValueBase") then return tonumber(obj.Value) or 0 end
+                    return tonumber(obj:GetAttribute("Quantity") or obj:GetAttribute("Count") or 1) or 1
+                end
+            end
+        end
+    end
+    return 0
+end
+local function equipSpecialBait(name)
+    if os.clock()-craftTracker.lastEquipBaitAt<15 then return false end
+    local available=ownedBaitCount(name)
+    if not available or available<1 then return false end
+    local remote=Events:FindFirstChild("EquipBait")
+    if not remote then return false end
+    craftTracker.lastEquipBaitAt=os.clock()
+    local ok=false
+    if remote:IsA("RemoteFunction") then ok=pcall(function() remote:InvokeServer(name) end)
+    elseif remote:IsA("RemoteEvent") then ok=pcall(function() remote:FireServer(name) end) end
+    if ok then craftTracker.status="Requested bait equip: "..name.." (check hotbar slot 2)" end
+    return ok
+end
+local function parseRequirements(data)
+    if type(data)~="table" then return nil end
+    local ing=data.Ingredient
+    if type(ing)~="table" then return nil end
+    local requirements={}
+    local found=0
+    for key,val in pairs(ing) do
+        local name,qty=nil,nil
+        if type(key)=="string" and tonumber(val) then
+            name,qty=key,tonumber(val)
+        elseif type(val)=="table" then
+            name=val.Name or val.Item or val.Fish or val[1]
+            qty=tonumber(val.Count or val.Amount or val.Quantity or val[2])
+        end
+        if type(name)~="string" or not qty or qty<=0 or qty>10000 then return nil end
+        requirements[name]=(requirements[name] or 0)+qty
+        found=found+1
+    end
+    return found>0 and requirements or nil
+end
+local function liveCraftModule(target)
+    local info=ReplicatedStorage:FindFirstChild("Info")
+    local inv=info and info:FindFirstChild("Inventory")
+    if not inv then return nil end
+    for _,m in ipairs(inv:GetChildren()) do
+        if m:IsA("ModuleScript") and fold(m.Name)==fold(target) then
+            local data=itemModule(m.Name)
+            if data and data.Ingredient and (not data.Type or fold(data.Type):find("rod",1,true)) then return m.Name,data end
+        end
+    end
+    return nil
+end
+local function maybeCraftBait(name)
+    if not state.autoCraftBait or os.clock()-craftTracker.lastBaitAt<90 then return false end
+    if (ownedBaitCount(name) or 0)>0 then return false end
+    local inf=ReplicatedStorage:FindFirstChild("Info")
+    local fld=inf and inf:FindFirstChild("Bait")
+    local mod=fld and fld:FindFirstChild(name)
+    if not mod or not mod:IsA("ModuleScript") then
+        craftTracker.status="Bait recipe missing: "..name
+        return false
+    end
+    local ok,data=pcall(require,mod)
+    local req=ok and parseRequirements(data) or nil
+    if not req then
+        craftTracker.status="Bait recipe format unverified: craft "..name.." manually"
+        return false
+    end
+    for material,qty in pairs(req) do
+        local count=ownedFishCount(material) or ownedBaitCount(material)
+        if not count or count<qty then
+            craftTracker.status="Bait material missing: "..material.." x"..qty
+            return false
+        end
+    end
+    craftTracker.lastBaitAt=os.clock()
+    if fire("CraftBait",name,1) then
+        craftTracker.status="Craft bait requested: "..name.." (verify inventory)"
+        return true
+    end
+    craftTracker.status="CraftBait remote not available"
+    return false
+end
+local function beginCraftAttempt()
+    if not state.autoCraftRod or craftTracker.pendingAt>0 or os.clock()-craftTracker.lastAt<135 then return end
+    if sellTracker.pending or isShopping() or buyerTripActive() then return end
+    local recipe,target=recipeForTarget()
+    if not recipe then return end
+    if ownedRod(target) then
+        craftTracker.status="OWNED: "..target
+        return
+    end
+    local actualName,data=liveCraftModule(target)
+    if not actualName then
+        craftTracker.status="Game has not replicated craftable "..target.."; no spend"
+        return
+    end
+    -- We require the game to expose the recipe and match its fish list.
+    local req=parseRequirements(data)
+    if not req then
+        craftTracker.status="Live recipe structure unknown; spend blocked"
+        return
+    end
+    local expected={}
+    for _,fish in ipairs(recipe.fish) do expected[fold(fish.name)]=true end
+    local confirmed=0
+    for material,qty in pairs(req) do
+        if expected[fold(material)] then
+            confirmed=confirmed+1
+            if (ownedFishCount(material) or 0)<qty then
+                craftTracker.status="Missing "..material.." x"..qty
+                return
+            end
+        end
+    end
+    if confirmed<4 then
+        craftTracker.status="Live recipe does not confirm all 4 fish; no spend"
+        return
+    end
+    local dataRoot=playerData()
+    local gems=candidateValue(dataRoot,{"Crystals","Crystal","Gems","Gem"})
+    if not gems then
+        craftTracker.status="Gem balance not replicated; craft blocked"
+        return
+    end
+    local price=tonumber(data.Crystals or data.CrystalPrice or data.Gems or data.GemPrice or data.CraftPrice) or recipe.cost
+    if gems<price then
+        craftTracker.status="Saving Gems for craft: "..gems.." / "..price
+        return
+    end
+    local snapshot={}
+    for _,fish in ipairs(recipe.fish) do snapshot[fish.name]=ownedFishCount(fish.name) end
+    craftTracker.lastAt=os.clock()
+    if fire("CraftRod",actualName) then
+        craftTracker.pendingAt=os.clock()
+        craftTracker.lastBefore={gem=gems,fish=snapshot,rod=actualName}
+        craftTracker.attempts=craftTracker.attempts+1
+        craftTracker.status="Craft request sent; checking rod and materials (chance of failure)"
+        report("Craft "..actualName.." request #"..craftTracker.attempts.." sent; no success assumed")
+    else
+        craftTracker.status="CraftRod remote missing or errored"
+    end
+end
+local function craftTick()
+    if not (state.autoCraftRod or state.autoFarmMaterials) then
+        craftTracker.route=nil
+        craftTracker.status="OFF"
+        return
+    end
+    if state.autoFarmMaterials and not state.protectMaterials then
+        craftTracker.route=nil
+        craftTracker.status="STOPPED: turn ON Protect Craft Materials before farming"
+        return
+    end
+    local recipe,target=recipeForTarget()
+    if not recipe then craftTracker.status="No recognized recipe";return end
+    if state.protectMaterials and state.autoFavorite then
+        local inv=getInventory()
+        if inv then
+            for _,fish in ipairs(inv:GetChildren()) do
+                if isCraftIngredient(fish) and not isFavorite(fish) then
+                    tryFavorite(fish)
+                    break
+                end
+            end
+        end
+    end
+    if craftTracker.pendingAt>0 then
+        if ownedRod(target) then
+            craftTracker.pendingAt=0
+            craftTracker.lastSuccessful=target
+            craftTracker.status="CRAFT SUCCESS verified: "..target
+            notify("Crafted "..target.."! Server inventory confirms ownership.")
+            return
+        end
+        if os.clock()-craftTracker.pendingAt<12 then return end
+        local changed=false
+        if craftTracker.lastBefore then
+            local old=craftTracker.lastBefore
+            local newGems=candidateValue(playerData(),{"Crystals","Crystal","Gems","Gem"})
+            if newGems and old.gem and newGems<old.gem then changed=true end
+            for fish,qty in pairs(old.fish) do
+                local current=ownedFishCount(fish)
+                if current and qty and current<qty then changed=true end
+            end
+        end
+        craftTracker.status=changed and "Craft consumed resources but no rod: likely failed (check UI)"
+            or "Craft not confirmed; retry blocked until resources and cooldown"
+        craftTracker.pendingAt=0
+    end
+    if ownedRod(target) then
+        craftTracker.route=nil
+        craftTracker.status="CRAFTED/OWNED: "..target
+        return
+    end
+    craftTracker.route=nil
+    local island,missing,note=knownFishForWeather()
+    if state.autoFarmMaterials then
+        craftTracker.route=island
+        craftTracker.fish=missing and missing.name or nil
+        craftTracker.status=note or "Scanning ingredients"
+        if island then
+            local p=profile()
+            local _,ownedPower=bestOwnedRod(p)
+            local power=math.max(rodPower(p.rod) or 0,ownedPower or 0)
+            local gate=0
+            for _,entry in ipairs(LEVEL_ROUTE) do
+                if entry.name==island then gate=entry.power;break end
+            end
+            if power<gate then
+                craftTracker.route=nil
+                craftTracker.status=("Need %d Power for %s (current %d). Keep leveling."):format(gate,island,power)
+            end
+        end
+        if missing and missing.bait then
+            maybeCraftBait(missing.bait)
+            if (ownedBaitCount(missing.bait) or 0)>0 then equipSpecialBait(missing.bait) end
+        end
+    end
+    if note=="All four recipe fish present" then
+        if state.autoCraftRod then beginCraftAttempt() else craftTracker.status="Ready to craft "..target.." (Auto Craft OFF)" end
+    end
+end
+local function findQuestNPC(query,location)
+    local folder=workspace:FindFirstChild("NPC") or workspace:FindFirstChild("NPCs")
+    if not folder then return nil,nil end
+    local aliases= (query=="sage") and {"sageyijiu","sageyiju","sageeugene"}
+        or (query=="ticket") and {"ticketquestgiver"}
+        or (query=="zeng") and {"zengtianguo"}
+        or {fold(query)}
+    local best,bestDist=nil,math.huge
+    local reference=location and cframeIsland(location)
+    for _,model in ipairs(folder:GetDescendants()) do
+        if model:IsA("Model") or model:IsA("BasePart") then
+            local name=fold(model.Name)..fold(model:GetAttribute("Name") or "")
+            local matches=false
+            for _,alias in ipairs(aliases) do
+                if name:find(alias,1,true) then matches=true;break end
+            end
+            if matches then
+                local part=getPart(model)
+                if part then
+                    local distance=reference and (part.Position-reference.Position).Magnitude or 0
+                    if distance<bestDist and (not reference or distance<550) then
+                        best,bestDist=part,distance
+                    end
+                end
+            end
+        end
+    end
+    return best,bestDist
+end
+local function findMainQuest(name)
+    local p=playerData()
+    local q=p and p:FindFirstChild("Quest")
+    local main=q and q:FindFirstChild("Main")
+    if not main then return nil end
+    local n=fold(name)
+    for _,obj in ipairs(main:GetChildren()) do
+        if fold(obj.Name):find(n,1,true) then return obj end
+    end
+    return nil
+end
+local function replicatedObjectivesComplete(q)
+    if not q then return false,"Quest not active" end
+    local info=ReplicatedStorage:FindFirstChild("Info")
+    local defs=info and info:FindFirstChild("MainQuest")
+    local module=defs and defs:FindFirstChild(q.Name)
+    if not module or not module:IsA("ModuleScript") then return false,"Objective module unavailable" end
+    local ok,rows=pcall(require,module)
+    if not ok or type(rows)~="table" then return false,"Cannot read objective module" end
+    local found=0
+    for _,obj in ipairs(q:GetChildren()) do
+        if obj:IsA("NumberValue") and tonumber(obj.Name) then
+            local definition=rows[tonumber(obj.Name)]
+            local goal=type(definition)=="table" and tonumber(definition[2]) or nil
+            if not goal then return false,"Unrecognized objective "..obj.Name end
+            found=found+1
+            if obj.Value<goal then
+                return false,obj.Name.." "..math.floor(obj.Value).."/"..math.floor(goal)
+            end
+        end
+    end
+    return found>0, found>0 and "All server goals met" or "No numeric goals replicated"
+end
+local function startNPCDialogue(part)
+    if not part then return false end
+    local p=part.Parent
+    local prompt=p and p:FindFirstChildWhichIsA("ProximityPrompt",true)
+    if not prompt then prompt=part:FindFirstChildWhichIsA("ProximityPrompt",true) end
+    if prompt and prompt.Enabled and type(fireproximityprompt)=="function" then
+        return pcall(function() fireproximityprompt(prompt) end)
+    end
+    local detector=p and p:FindFirstChildWhichIsA("ClickDetector",true)
+    if detector and type(fireclickdetector)=="function" then
+        return pcall(function() fireclickdetector(detector) end)
+    end
+    return false
+end
+local function clickQuestDialogue(wanted)
+    local mg=PlayerGui:FindFirstChild("MainGui")
+    local menu=mg and mg:FindFirstChild("Menu")
+    local dialogue=menu and menu:FindFirstChild("Dialogue")
+    if not dialogue or not dialogue:IsA("GuiObject") or not dialogue.Visible then return false end
+    local text=""
+    for _,obj in ipairs(dialogue:GetDescendants()) do
+        if obj:IsA("TextLabel") and guiVisible(obj) then text=text.." "..obj.Text end
+    end
+    local lower=text:lower()
+    if not (lower:find("sage",1,true) or lower:find("diamond",1,true)
+        or (wanted=="ticket" and lower:find("ticket",1,true))) then return false end
+    if wanted=="sage" and not (lower:find("sage",1,true) or lower:find("diamond",1,true)) then return false end
+    local candidate=nil
+    for _,obj in ipairs(dialogue:GetDescendants()) do
+        if obj:IsA("GuiButton") and guiVisible(obj) then
+            local label=buttonActionText(obj)
+            if label:find("accept",1,true) or label:find("claim",1,true)
+                or label:find("complete",1,true) or label:find("quest",1,true) then
+                candidate=obj; break
+            end
+        end
+    end
+    if not candidate then return false end
+    return clickGameButton(candidate)
+end
+local function diamondOwned()
+    return ownedRod("Diamond Rod") or profile().rod=="Diamond Rod"
+end
+local function sageActiveQuest()
+    for _,tag in ipairs({"Sage Yijiu","Sage Yiju","Sage Eugene","Diamond Rod"}) do
+        local quest=findMainQuest(tag)
+        if quest then return quest end
+    end
+    return nil
+end
+local function finishSageRoute()
+    questTracker.sage="DONE - Diamond Rod owned"
+    questTracker.sageRoute=nil
+    questTracker.status="Diamond Rod: verified owned"
+end
+local function sageQuestTick()
+    if not state.autoQuests or not state.autoSageAfterAmber then
+        questTracker.sageRoute=nil
+        return
+    end
+    if os.clock() < (hub.manualTravelUntil or 0) then return end
+    if diamondOwned() then finishSageRoute(); return end
+    local p=profile()
+    local owned,bestPower=bestOwnedRod(p)
+    local ready=math.max(bestPower or 0,rodPower(p.rod) or 0)>=83
+    if not ready then
+        questTracker.sage="Waiting for Starlight Rod / Amber tier"
+        questTracker.sageRoute=nil
+        return
+    end
+    local q=sageActiveQuest()
+    local complete,summary=replicatedObjectivesComplete(q)
+    if q and not complete then
+        questTracker.sage="ACTIVE: "..summary
+        questTracker.sageRoute="Amber Isle"
+        questTracker.status="Sage Diamond quest: fishing heavy Amber catches; game records weights"
+        return
+    end
+    questTracker.sageRoute="Battlefield Isle"
+    -- Avoid interrupting the independent crafting-material mode. Its route
+    -- takes priority only while a matching weather fish can be farmed.
+    if state.autoFarmMaterials and craftTracker.route then
+        questTracker.status="Sage conversation paused for weather fish farming"
+        return
+    end
+    local phase=q and "TURN IN" or "ACCEPT"
+    questTracker.sage=phase.." Diamond Rod quest at Sage"
+    questTracker.status=phase.." Sage quest (requires actual dialogue/quest confirmation)"
+    if os.clock()-questTracker.lastInteract<16 then return end
+    if isShopping() or buyerTripActive() or sellTracker.pending then return end
+    local _,root,hum=getChar()
+    local _,active=minigame()
+    if not root or not hum or hum.Health<=0 or active then return end
+    local sage=findQuestNPC("sage","Battlefield Isle")
+    questTracker.lastInteract=os.clock()
+    if sage then
+        if (sage.Position-root.Position).Magnitude>11 then
+            teleportTo(sage.CFrame*CFrame.new(0,0,-5),"Battlefield Sage")
+        else
+            local triggered=startNPCDialogue(sage)
+            if triggered then questTracker.status=phase..": Sage dialogue prompted; waiting for quest data" end
+        end
+    else
+        local cf=cframeIsland("Battlefield Isle")
+        if cf and (root.Position-cf.Position).Magnitude>130 then
+            teleportTo(cf,"Battlefield (load Sage)")
+        else
+            questTracker.status="Sage NPC not loaded; speak to him once if necessary"
+        end
+    end
+    if os.clock()-questTracker.lastUI>7 then
+        if clickQuestDialogue("sage") then
+            questTracker.lastUI=os.clock()
+            questTracker.status="Sage quest GUI clicked; verifying server quest folder"
+        end
+    end
+end
+-- Match the exact server-recognized NPC instance when available.
+-- StarCrow passes workspace.NPC.Function["Ticket Quest Giver"] to the remote.
+local function dialogueGiver(name)
+    local npc=workspace:FindFirstChild("NPC")
+    local fun=npc and npc:FindFirstChild("Function")
+    local exact=fun and fun:FindFirstChild(name)
+    if exact then return exact,getPart(exact) end
+    local pt=findQuestNPC(name=="Ticket Quest Giver" and "ticket" or "zeng")
+    return pt,pt
+end
+local function currentTicketQuest()
+    local p=playerData()
+    local quests=p and p:FindFirstChild("Quest")
+    local main=quests and quests:FindFirstChild("Main")
+    if not main then return nil end
+    for _,name in ipairs({"Hard Ticket Quest","Easy Ticket Quest","Ticket Quest"}) do
+        local match=main:FindFirstChild(name)
+        if match then return match end
+    end
+    return nil
+end
+local function ticketQuestTick()
+    if not (state.autoQuests and state.autoTicketQuests) then return end
+    if questTracker.sageRoute then return end
+    if os.clock()-questTracker.lastTicket<20 then return end
+    local dialog=PlayerGui:FindFirstChild("MainGui")
+    local menu=dialog and dialog:FindFirstChild("Menu")
+    local box=menu and menu:FindFirstChild("Dialogue")
+    if box and box.Visible then
+        for _,obj in ipairs(box:GetDescendants()) do
+            if obj:IsA("TextLabel") and obj.Text:lower():find("daily limit",1,true) then
+                questTracker.ticketStatus="Daily ticket limit reached (paused)"
+                state.autoTicketQuests=false
+                if callbacks.autoTicketQuests then callbacks.autoTicketQuests() end
+                return
+            end
+        end
+    end
+    local giver,giverPart=dialogueGiver("Ticket Quest Giver")
+    local ev=event("ChooseDialogueOption")
+    if not giver or not giverPart or not ev then
+        questTracker.ticketStatus="Ticket NPC or dialogue remote not loaded"
+        return
+    end
+    local q=currentTicketQuest()
+    if q then
+        local done,summary=replicatedObjectivesComplete(q)
+        if not done then questTracker.ticketStatus="Active "..q.Name..": "..summary;return end
+    end
+    local _,root=getChar()
+    local _,active=minigame()
+    if not root or active or isShopping() or buyerTripActive() then return end
+    questTracker.lastTicket=os.clock()
+    if (root.Position-giverPart.Position).Magnitude>13 then
+        hub.manualTravelUntil=os.clock()+25
+        teleportTo(giverPart.CFrame*CFrame.new(0,0,-5),"Ticket Quest Giver")
+        questTracker.ticketStatus="Traveling to ticket quest NPC"
+        return
+    end
+    -- The two argument formats below are directly documented in the public
+    -- readable StarCrow source. Never loop them more often than cooldown.
+    local success=false
+    if q then
+        success=fire("ChooseDialogueOption","Ticket Quest Giver",1,"Quest",{giver})
+        questTracker.ticketStatus=success and "Ticket turn-in requested; check reward" or "Ticket turn-in failed"
+    else
+        local mode=state.ticketQuestMode=="Easy" and "Easy" or "Hard"
+        local index=mode=="Easy" and 1 or 2
+        success=fire("ChooseDialogueOption","Ticket Quest Giver",index,mode.."AcceptQuest",{giver,"Ticket Quest"})
+        questTracker.ticketStatus=success and (mode.." ticket accept requested; verify quest") or "Ticket accept failed"
+    end
+end
+
+-- Zeng repeatable: both ChooseDialogueOption variants were verified against
+-- the public readable StarCrow source. Turn in ONLY if progress says complete.
+local function zengQuestTick()
+    if not (state.autoQuests and state.autoZengQuest) then return end
+    if questTracker.sageRoute then return end
+    if os.clock()-questTracker.lastZeng<27 then return end
+    local npc,part=dialogueGiver("Zeng Tianguo")
+    if not npc or not part or not event("ChooseDialogueOption") then
+        questTracker.zengStatus="NPC or dialogue event not loaded"
+        return
+    end
+    local active=findMainQuest("Zeng Tianguo")
+    if active then
+        local done,summary=replicatedObjectivesComplete(active)
+        if not done then
+            questTracker.zengStatus="Active: "..summary
+            return
+        end
+    end
+    local _,root=getChar()
+    local _,fishing=minigame()
+    if not root or fishing or isShopping() or buyerTripActive() then return end
+    questTracker.lastZeng=os.clock()
+    if (root.Position-part.Position).Magnitude>13 then
+        hub.manualTravelUntil=os.clock()+27
+        teleportTo(part.CFrame*CFrame.new(0,0,-5),"Zeng Tianguo quest giver")
+        questTracker.zengStatus="Travel to repeatable quest giver"
+        return
+    end
+    if active then
+        local sent=fire("ChooseDialogueOption","Zeng Tianguo",1,"Quest",{npc})
+        questTracker.zengStatus=sent and "Zeng turn-in requested; verify reward" or "Turn-in request failed"
+    else
+        local sent=fire("ChooseDialogueOption","Zeng Tianguo",1,"AcceptQuest",{npc,"Zeng Tianguo Quest"})
+        questTracker.zengStatus=sent and "Zeng accepted? Checking replicated quest" or "Accept failed"
+    end
+end
+
+local function sideQuestStatus()
+    local p=playerData()
+    local q=p and p:FindFirstChild("Quest")
+    local main=q and q:FindFirstChild("Main")
+    if not main then return "Main quests not replicated" end
+    local total,done=0,0
+    local activeNames={}
+    for _,obj in ipairs(main:GetChildren()) do
+        total=total+1
+        local complete=replicatedObjectivesComplete(obj)
+        if complete then done=done+1 end
+        if #activeNames<4 then table.insert(activeNames,obj.Name) end
+    end
+    return ("Active main quests %d (verified finished %d): %s"):format(total,done,table.concat(activeNames,", "))
+end
+local function questTick()
+    if not state.autoQuests then
+        questTracker.status="OFF"
+        questTracker.sageRoute=nil
+        return
+    end
+    if state.autoDailyQuest then claimCompletedDailies() end
+    sageQuestTick()
+    -- Independent Auto Quest mode can start fishing when Sage goals need catches.
+    if state.autoSageAfterAmber and questTracker.sageRoute=="Amber Isle" then
+        for _,flag in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam",
+                              "charge","rhythm","phase2"}) do
+            if not state[flag] then setState(flag,true) end
+        end
+    end
+    ticketQuestTick()
+    zengQuestTick()
+    questTracker.side=sideQuestStatus()
+end
+local function activeFarmOverride()
+    if os.clock()<(hub.manualTravelUntil or 0) then return nil end
+    if state.autoFarmMaterials and craftTracker.route then
+        return craftTracker.route,"craft"
+    end
+    if state.autoQuests and state.autoSageAfterAmber and questTracker.sageRoute then
+        return questTracker.sageRoute,"sage"
+    end
+    return nil
+end
+local lastAuxRoute=-math.huge
+local function auxiliaryFarmTick()
+    if state.autoLevel or not state.autoRoute then return end
+    local island,reason=activeFarmOverride()
+    if not island or (os.clock()<(hub.manualTravelUntil or 0)) then return end
+    local now=os.clock()
+    if now-lastAuxRoute<12 or isShopping() or buyerTripActive() or sellTracker.pending then return end
+    local _,root,hum=getChar()
+    local _,fishing=minigame()
+    local cf=cframeIsland(island)
+    if not root or not hum or hum.Health<=0 or fishing or not cf then return end
+    if (root.Position-cf.Position).Magnitude>230 then
+        lastAuxRoute=now
+        teleportTo(cf,reason.." fishing at "..island)
+        facingTracker.lastAt=0
+    end
+end
+local function scanMerchants()
+    local npc=workspace:FindFirstChild("NPC") or workspace:FindFirstChild("NPCs")
+    merchantTracker.Maoshan=nil
+    merchantTracker.Taoist=nil
+    if not npc then return end
+    for _,obj in ipairs(npc:GetDescendants()) do
+        if obj:IsA("Model") or obj:IsA("BasePart") then
+            local name=fold(obj.Name)..fold(obj:GetAttribute("Name") or "")
+            local kind=nil
+            if name:find("maoshan",1,true) or name:find("maosan",1,true) then kind="Maoshan"
+            elseif name:find("taoist",1,true) or name:find("taosi",1,true) then kind="Taoist" end
+            if kind then
+                local part=getPart(obj)
+                if part and part:IsDescendantOf(workspace) then
+                    if not merchantTracker[kind] then merchantTracker[kind]=part end
+                end
+            end
+        end
+    end
+    for _,kind in ipairs({"Maoshan","Taoist"}) do
+        local part=merchantTracker[kind]
+        if state.merchantAlerts and part and not merchantTracker.lastSeen[kind] then
+            merchantTracker.alerts=merchantTracker.alerts+1
+            notify(kind.." merchant detected! TAP the popup to teleport; loaded server NPC only.")
+        end
+        merchantTracker.lastSeen[kind]=part~=nil
+    end
+end
+local function tpMerchant(kind)
+    local part=merchantTracker[kind]
+    if not part or not part.Parent or not part:IsDescendantOf(workspace) then
+        scanMerchants()
+        part=merchantTracker[kind]
+    end
+    if not part then
+        notify(kind.." not loaded on this server (can't teleport)")
+        return false
+    end
+    hub.manualTravelUntil=os.clock()+95
+    return teleportTo(part.CFrame*CFrame.new(0,0,-7),kind.." merchant")
+end
+
+return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
+end)()
+
 -- GUI creation. Built with Roblox instances; no remote UI code.
 local container = PlayerGui
 pcall(function()
@@ -1281,7 +2061,7 @@ local title = make("TextLabel", header, {
     Position = UDim2.fromOffset(14, 5), Size = UDim2.new(1, -107, 0, 24),
 })
 local headerSubtitle = make("TextLabel", header, {
-    BackgroundTransparency = 1, Text = "v2.3 | sea facing | shop | sell", TextXAlignment = Enum.TextXAlignment.Left,
+    BackgroundTransparency = 1, Text = "v2.4 | rods | quests | crafting", TextXAlignment = Enum.TextXAlignment.Left,
     Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = colors.muted,
     Position = UDim2.fromOffset(14, 28), Size = UDim2.new(1, -107, 0, 16),
 })
@@ -1297,9 +2077,11 @@ local closeButton = make("TextButton", header, {
     Position = UDim2.new(1, -39, 0, 10),
 })
 round(closeButton, 6)
-local tabBar = make("Frame", main, {
-    BackgroundTransparency = 1, Size = UDim2.new(1, -16, 0, 39),
-    Position = UDim2.fromOffset(8, 54),
+local tabBar = make("ScrollingFrame", main, {
+    BackgroundTransparency = 1, BorderSizePixel=0,
+    Size = UDim2.new(1, -16, 0, 39), Position = UDim2.fromOffset(8, 54),
+    ScrollBarThickness = 2, ScrollingDirection=Enum.ScrollingDirection.X,
+    AutomaticCanvasSize=Enum.AutomaticSize.X, CanvasSize=UDim2.new(),
 })
 local tabList = make("UIListLayout", tabBar, {
     FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center,
@@ -1377,7 +2159,7 @@ local function createTab(name)
     local btn = make("TextButton", tabBar, {
         BackgroundColor3 = colors.panel, TextColor3 = colors.muted,
         Text = name, TextSize = compact and 10 or 12, Font = Enum.Font.GothamBold,
-        Size = UDim2.new(0.2, -5, 0, 32), BorderSizePixel = 0,
+        Size = UDim2.fromOffset(compact and 69 or 79,32), BorderSizePixel = 0,
     })
     round(btn, 7)
     tabs[name] = btn
@@ -1404,8 +2186,10 @@ local function createTab(name)
 end
 local levelPage = createTab("Level")
 local fishPage = createTab("Fish")
-local bossPage = createTab("Boss")
+local questPage = createTab("Quests")
+local craftPage = createTab("Craft")
 local worldPage = createTab("World")
+local bossPage = createTab("Boss")
 local extraPage = createTab("Other")
 
 local function section(parent, name)
@@ -1518,14 +2302,12 @@ local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
     local active=not state.autoLevel
     setState("autoLevel",active)
     if active then
-        for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2","autoSell"}) do
+        for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
             setState(k,true)
         end
         setState("sellNearFull",false)
-        -- Fresh-account economy mode: sell all fish for rod Cash; user can
-        -- turn protection back on in Fish tab if keeping rares matters.
-        setState("protectRare",false)
-        setState("fastSell",true)
+        -- Auto Sell/Quests are independent. Use the QUICK START preset to
+        -- enable both intentionally; toggles remain available individually.
         setState("autoFavorite",true)
         setState("autoEnzo",false)
         setState("autoLong",false)
@@ -1535,10 +2317,10 @@ local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
         lastProfileLevel=nil
         lastProfileXP=nil
         levelGained=0
-        progressionStatus="Started: sea-facing, selling and Cash saving enabled"
-        report("Auto level started: selling all fish for Cash, one target rod per island. Turn on rare protection if wanted.")
+        progressionStatus="Farming started. Selling and quests are separate switches."
+        report("Auto Level ON. Use Auto Sell and Auto Quests separately or the QUICK START preset.")
     else
-        for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2","autoSell"}) do
+        for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
             setState(k,false)
         end
         if isShopping() then finishRodShop("Stopped by user",0) end
@@ -1548,9 +2330,26 @@ local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
             sellTracker.returnCF=nil
             if returnCF then teleportTo(returnCF,"cancel buyer trip") end
         end
-        report("Auto level stopped. Fishing automation and selling stopped.")
+        report("Auto level stopped. Auto Sell / Auto Quests retain their independent settings.")
     end
     btn.Text=active and "STOP AUTO LEVEL" or "START AUTO LEVEL TO 500"
+end,true)
+action(levelPage,"QUICK START: LEVEL + SELL + QUESTS",function()
+    -- Convenience preset; all three remain individually toggleable.
+    if not state.autoLevel then
+        setState("autoLevel",true)
+        for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do setState(k,true) end
+        levelBtn.Text="STOP AUTO LEVEL"
+    end
+    setState("autoSell",true)
+    setState("autoQuests",true)
+    setState("autoFavorite",true)
+    setState("fastSell",true)
+    setState("sellNearFull",false)
+    setState("autoEnzo",false)
+    setState("autoLong",false)
+    lastCatchAt=os.clock()
+    notify("Quick Start ON. Auto Sell & Auto Quests can be disabled separately in their tabs.")
 end,true)
 toggle(levelPage,"Auto route based on equipped rod Power","autoRoute")
 toggle(levelPage,"Auto face sea before casting","autoSeaFacing")
@@ -1558,7 +2357,7 @@ toggle(levelPage,"Auto shop one best rod per island (UI)","autoBuyRod")
 toggle(levelPage,"Auto claim eligible free codes","autoCodes")
 toggle(levelPage,"Auto claim completed daily quests","autoDailyQuest")
 toggle(levelPage,"Favorite rare fish before selling","autoFavorite")
-toggle(levelPage,"FAST SELL (can sell valuable fish!)","fastSell",function(v)
+toggle(levelPage,"FAST SELL (will sell non-favorites)","fastSell",function(v)
     if v then notify("FAST SELL ON: rare catches can be sold! Turn OFF to protect them.") end
 end)
 stepper(levelPage,"Goal level","targetLevel",50,2000,50,"")
@@ -1606,6 +2405,139 @@ action(levelPage,"RECHECK LEVEL/ROD NOW",function()
     notify("Level "..tostring(p.level or "?").."; Rod "..tostring(p.rod).."; Power "..tostring(pow or "?").."; Cash "..tostring(p.cash or "?"))
 end)
 
+-- Quests are independent from Auto Level and Auto Sell.
+section(questPage,"Verified quest automation / server progress")
+local questHUD=make("TextLabel",questPage,{
+    BackgroundColor3=colors.panel,TextColor3=colors.accent,
+    Font=Enum.Font.Gotham,TextSize=compact and 10 or 11,
+    Text="Quest engine OFF",TextWrapped=true,
+    TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
+    Size=UDim2.new(1,-4,0,123),
+})
+round(questHUD,7)
+toggle(questPage,"AUTO QUESTS (master, separate)","autoQuests",function(v)
+    notify(v and "Quest engine on; NPC/objective detection is best-effort." or "Quest engine OFF")
+end)
+toggle(questPage,"After Amber: Sage -> Diamond Rod","autoSageAfterAmber")
+toggle(questPage,"Auto ticket quests (verified remote)","autoTicketQuests")
+toggle(questPage,"Auto Zeng repeatable (verified remote)","autoZengQuest")
+toggle(questPage,"Claim completed daily quest rewards","autoDailyQuest")
+action(questPage,"TICKET MODE: Easy",function(btn)
+    state.ticketQuestMode=state.ticketQuestMode=="Easy" and "Hard" or "Easy"
+    btn.Text="TICKET MODE: "..state.ticketQuestMode
+end)
+action(questPage,"TP TO BATTLEFIELD SAGE",function()
+    local npc=ext.findQuestNPC("sage","Battlefield Isle")
+    hub.manualTravelUntil=os.clock()+65
+    teleportTo(npc and npc.CFrame*CFrame.new(0,0,-7) or cframeIsland("Battlefield Isle"),"Sage Yijiu")
+end)
+action(questPage,"READ SERVER QUEST STATUS",function()
+    local out={"Sage: "..ext.questTracker.sage,"Ticket: "..ext.questTracker.ticketStatus,
+        "Zeng: "..ext.questTracker.zengStatus,ext.sideQuestStatus()}
+    for _,line in ipairs(out) do print("[KITKIT QUEST] "..line) end
+    notify("Server quest status printed to executor console")
+end)
+action(questPage,"LIST LIVE QUEST MODULES (FROM GAME)",function()
+    local info=ReplicatedStorage:FindFirstChild("Info")
+    local defs=info and info:FindFirstChild("MainQuest")
+    if not defs then
+        notify("Game has not replicated Info.MainQuest; quest catalog unavailable")
+        return
+    end
+    local n=0
+    for _,mod in ipairs(defs:GetChildren()) do
+        if mod:IsA("ModuleScript") then
+            n=n+1
+            local ok,rows=pcall(require,mod)
+            local objectives=(ok and type(rows)=="table") and #rows or "?"
+            print(("[KITKIT LIVE QUEST %03d] %s | objective definitions: %s")
+                :format(n,mod.Name,tostring(objectives)))
+        end
+    end
+    notify("Read "..n.." live quest definitions; see executor console (not all auto-completable).")
+end)
+section(questPage,"Known quest catalog (reference, not all automated)")
+make("TextLabel",questPage,{
+    Text="Verified automated: completed Daily claims, Ticket quests and Zeng dialogue. Sage Diamond: travel/farm/accept/turn-in attempts; reward confirmation via owned rod. Other NPCs listed for reference until their live dialogue is known.",
+    TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,TextXAlignment=Enum.TextXAlignment.Left,
+    BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,TextSize=11,
+    Size=UDim2.new(1,-4,0,87),
+})
+action(questPage,"PRINT RESEARCHED QUEST INDEX (17)",function()
+    for i,q in ipairs(ext.QUESTRUN_CATALOG) do
+        print(("[KITKIT QUEST %02d] %s @ %s | %s | %s"):format(i,q.npc,q.island,q.reward,q.objective))
+    end
+    notify("Quest catalog printed to executor console; not all entries are executable.")
+end)
+
+section(craftPage,"Auto gather + craft (separate)")
+local craftHUD=make("TextLabel",craftPage,{
+    BackgroundColor3=colors.panel,TextColor3=colors.accent,
+    Font=Enum.Font.Gotham,TextSize=compact and 10 or 11,
+    Text="Crafting OFF",TextWrapped=true,
+    TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
+    Size=UDim2.new(1,-4,0,123),
+})
+round(craftHUD,7)
+action(craftPage,"TARGET ROD: Heavenpiercer Rod",function(btn)
+    state.craftTarget=state.craftTarget=="Heavenpiercer Rod" and "Pure Diamond Rod" or "Heavenpiercer Rod"
+    ext.craftTracker.status="Target changed; protecting ingredients for "..state.craftTarget
+    ext.craftTracker.lastBefore=nil
+    ext.craftTracker.pendingAt=0
+    btn.Text="TARGET ROD: "..state.craftTarget
+    notify("Craft target: "..state.craftTarget)
+end)
+toggle(craftPage,"AUTO FARM MATERIAL FISH","autoFarmMaterials",function(v)
+    if v and not state.protectMaterials then
+        setState("autoFarmMaterials",false)
+        notify("Turn on Protect Craft Materials before gathering.")
+    elseif v then
+        for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
+            setState(k,true)
+        end
+        setState("autoEnzo",false);setState("autoLong",false)
+        notify("Ingredient farming ON with fishing engine; wait for matching weather.")
+    end
+end)
+toggle(craftPage,"AUTO CRAFT ROD (spends Gems!)","autoCraftRod",function(v)
+    if v then notify("Auto Craft ON: verified materials + Gems will be spent when ready. Failure is possible!") end
+end)
+toggle(craftPage,"Auto craft special bait if recipe known","autoCraftBait")
+toggle(craftPage,"Protect target fish from Auto Sell","protectMaterials",function(v)
+    if not v and state.autoFarmMaterials then
+        setState("autoFarmMaterials",false)
+        notify("Material farming stopped: protection must remain ON.")
+    end
+end)
+toggle(craftPage,"Auto favorite protected fish","autoFavorite")
+action(craftPage,"CHECK CRAFT REQUIREMENTS NOW",function()
+    local recipe,name=ext.recipeForTarget()
+    local missing={}
+    for _,entry in ipairs(recipe and recipe.fish or {}) do
+        local owned=ext.ownedFishCount(entry.name)
+        local detail=entry.weather and (entry.island.." / "..entry.weather)
+            or ("Summon with "..tostring(entry.bait))
+        local line=entry.name.." = "..tostring(owned or "?").." | "..detail
+        table.insert(missing,line)
+        print("[KITKIT CRAFT] "..line)
+    end
+    local root=playerData()
+    print("[KITKIT CRAFT] Crystals/Gems="..tostring(candidateValue(root,{"Crystals","Crystal","Gems","Gem"})))
+    print("[KITKIT CRAFT] Game crafting module="..tostring(ext.liveCraftModule(name)))
+    notify("Craft requirements printed to console; status: "..ext.craftTracker.status)
+end)
+action(craftPage,"CRAFT ONE IF VERIFIED (AUTO CRAFT ON)",function()
+    if not state.autoCraftRod then notify("Enable Auto Craft first so Gem spending is intentional") return end
+    ext.beginCraftAttempt()
+    notify(ext.craftTracker.status)
+end)
+make("TextLabel",craftPage,{
+    Text="Weather must match to farm each weather fish. Rainbow/Frost bait fish require bait. Missing live recipe, Gem balance, or fish blocks crafting; server decides success. We never claim a craft succeeded without the rod in your inventory.",
+    TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,TextXAlignment=Enum.TextXAlignment.Left,
+    BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,TextSize=11,
+    Size=UDim2.new(1,-4,0,87),
+})
+
 section(fishPage, "Fishing automation")
 local reelStatusHUD = make("TextLabel", fishPage, {
     BackgroundColor3 = colors.panel, TextColor3 = colors.accent,
@@ -1642,7 +2574,7 @@ toggle(fishPage, "Use Z skill", "skillZ")
 toggle(fishPage, "Use X skill", "skillX")
 toggle(fishPage, "Use C skill", "skillC")
 toggle(fishPage, "Use V skill", "skillV")
-section(fishPage, "Selling - OFF unless Auto Level is started")
+section(fishPage, "Selling - independently ON/OFF")
 toggle(fishPage, "AUTO SELL ALL (caution)", "autoSell", function(v)
     if v then notify("Auto Sell ON. Rare protection is best-effort, not guaranteed!") end
 end)
@@ -1672,14 +2604,14 @@ local bossInfo = make("TextLabel", bossPage, {
 toggle(bossPage, "Auto Enzo boss (retries)", "autoEnzo", function(v)
     if v then
         setState("autoLong", false); setState("autoLevel",false)
-        for _,k in ipairs({"autoCast","autoReel","autoSkill","autoSell"}) do setState(k,false) end
+        for _,k in ipairs({"autoCast","autoReel","autoSkill"}) do setState(k,false) end
         levelBtn.Text="START AUTO LEVEL TO 500"
     end
 end)
 toggle(bossPage, "Auto Long Diaohai (secret)", "autoLong", function(v)
     if v then
         setState("autoEnzo", false); setState("autoLevel",false)
-        for _,k in ipairs({"autoCast","autoReel","autoSkill","autoSell"}) do setState(k,false) end
+        for _,k in ipairs({"autoCast","autoReel","autoSkill"}) do setState(k,false) end
         levelBtn.Text="START AUTO LEVEL TO 500"
     end
 end)
@@ -1715,6 +2647,43 @@ action(bossPage, "TP TO FIRST DETECTED BOSS", function()
     if b.first then teleportTo(b.first.part.CFrame * CFrame.new(0, 0, -8), b.first.name)
     else notify("No boss object currently loaded") end
 end)
+
+section(worldPage,"Roaming NPCs: click to teleport")
+toggle(worldPage,"Popup when Maoshan/Taoist is loaded","merchantAlerts")
+action(worldPage,"REFRESH MAOSHAN / TAOIST SCAN",function()
+    ext.scanMerchants()
+    local parts={}
+    for _,name in ipairs({"Maoshan","Taoist"}) do
+        parts[#parts+1]=name.."="..(ext.merchantTracker[name] and "HERE" or "not loaded")
+    end
+    notify(table.concat(parts," | "))
+end)
+action(worldPage,"TP TO MAOSHAN (if spawned)",function() ext.tpMerchant("Maoshan") end)
+action(worldPage,"TP TO TAOIST (if spawned)",function() ext.tpMerchant("Taoist") end)
+-- Clickable toast stays visible even when the main window is minimized.
+local roamingPopup=make("Frame",GUI,{
+    Name="MerchantAlerts", BackgroundColor3=colors.panel,BorderSizePixel=0,
+    Position=UDim2.new(1,-246,0,95), Size=UDim2.fromOffset(230,100),
+    Visible=false, ZIndex=20,
+})
+round(roamingPopup,9);edge(roamingPopup,colors.gold)
+make("TextLabel",roamingPopup,{
+    Text="ROAMING NPC DETECTED - TAP TO TP",TextColor3=colors.gold,
+    BackgroundTransparency=1,TextSize=10,Font=Enum.Font.GothamBold,
+    Size=UDim2.new(1,-8,0,25),Position=UDim2.fromOffset(4,1),ZIndex=21,
+})
+local merchantButtons={}
+for i,name in ipairs({"Maoshan","Taoist"}) do
+    local btn=make("TextButton",roamingPopup,{
+        Text=name:upper().."   |   TELEPORT",BackgroundColor3=colors.row,
+        TextColor3=colors.white,Font=Enum.Font.GothamBold,TextSize=12,
+        Position=UDim2.fromOffset(8,27+(i-1)*35),
+        Size=UDim2.new(1,-16,0,29),Visible=false,ZIndex=21,
+    })
+    round(btn,6)
+    merchantButtons[name]=btn
+    track(btn.MouseButton1Click:Connect(function() ext.tpMerchant(name) end))
+end
 
 section(worldPage, "Server weather")
 local weatherLabel = make("TextLabel", worldPage, {
@@ -1799,10 +2768,10 @@ make("TextLabel", extraPage, {
     BackgroundTransparency = 1, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = colors.muted,
     Font = Enum.Font.Gotham, TextSize = 11,
-    Text = "Auto Level sells ALL fish to save for one rod per island. Rod buying uses only a matched in-game shop GUI. "
-        .. "No speculative purchase remotes, crystals, crafting, summons, trait rolls or gacha. "
-        .. "Protect rares manually if needed; code/quest/shop features can fail. Live behavior UNTESTED.",
-    Size = UDim2.new(1, -4, 0, 80),
+    Text = "Auto Sell, Auto Quests and Auto Craft are independent. Level route saves Cash for one target rod per island. "
+        .. "Crafting uses server-replicated recipes and can spend Gems with a chance of failure. "
+        .. "Material fish must be favorited before Sell All. Quest/shop/craft features are best-effort and LIVE UNTESTED.",
+    Size = UDim2.new(1, -4, 0, 91),
 })
 action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     local p=profile()
@@ -1823,7 +2792,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.3 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.4 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
@@ -1838,6 +2807,12 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
             .." Verified="..sellTracker.confirmed.." Unconfirmed="..sellTracker.failed
             .." BuyerTrip="..sellTracker.buyerPhase,
         "Shop="..rodShop.status.." Phase="..rodShop.phase.." LastTarget="..rodShop.lastShopTarget,
+        "Quest="..ext.questTracker.status.." Sage="..ext.questTracker.sage.." Ticket="..ext.questTracker.ticketStatus..
+            " Zeng="..ext.questTracker.zengStatus,
+        "Craft="..ext.craftTracker.status.." Target="..state.craftTarget..
+            " Attempts="..ext.craftTracker.attempts,
+        "Merchant Maoshan="..tostring(ext.merchantTracker.Maoshan~=nil)..
+            " Taoist="..tostring(ext.merchantTracker.Taoist~=nil),
         "AutoBuy="..tostring(state.autoBuyRod).." SeaFacing="..tostring(state.autoSeaFacing),
         "Data child keys="..table.concat(dataNames,", "),
         "Event names="..table.concat(names,", "),
@@ -2048,7 +3023,8 @@ local function trackInventory()
             if not hub.running then return end
             catchesThisSession=catchesThisSession+1
             lastCatchAt=os.clock()
-            if flaggedRare(child) and state.autoLevel and state.protectRare then
+            if (state.protectMaterials and isCraftIngredient and isCraftIngredient(child))
+                or (flaggedRare(child) and state.autoLevel and state.protectRare) then
                 task.defer(function()
                     if hub.running and child.Parent then tryFavorite(child) end
                 end)
@@ -2058,7 +3034,7 @@ local function trackInventory()
 end
 local function stopAutoLevel(reason)
     state.autoLevel=false
-    for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2","autoSell"}) do
+    for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
         setState(k,false)
     end
     progressionStatus=reason
@@ -2076,9 +3052,10 @@ local function progressionTick()
         return
     end
     if state.autoCodes and p.data then redeemEligibleCodes(p.level) end
-    if state.autoDailyQuest then claimCompletedDailies() end
-    if p.level and p.level>=state.targetLevel then
-        stopAutoLevel("GOAL HIT: Level "..p.level.."! Farming/selling stopped.")
+    if p.level and p.level>=state.targetLevel
+        and not (state.autoQuests and state.autoSageAfterAmber
+            and (not ext.diamondOwned()) and ext.questTracker.sageRoute) then
+        stopAutoLevel("GOAL HIT: Level "..p.level.."! Fishing stopped; Sell/Quests stay independent.")
         return
     end
     if p.level then
@@ -2095,12 +3072,19 @@ local function progressionTick()
     end
     trackInventory()
     local desired,power,index=routeChoice(p)
-    if not power then
+    local override,overrideReason=ext.activeFarmOverride()
+    if override then desired=override end
+    if overrideReason=="sage" then
+        progressionStatus="Sage Diamond quest: "..ext.questTracker.sage
+    elseif overrideReason=="craft" then
+        progressionStatus="Gathering "..tostring(ext.craftTracker.fish).." in "..desired
+    elseif not power then
         progressionStatus="Rod Power unknown: staying on Beginning Isle"
     else
         progressionStatus="Farming "..desired.." (Power "..power..")"
     end
-    if state.autoRoute and not isShopping() and not buyerTripActive()
+    if state.autoRoute and now>=(hub.manualTravelUntil or 0)
+        and not isShopping() and not buyerTripActive()
         and not sellTracker.pending and (now-lastAutoRoute>=12) then
         lastAutoRoute=now
         local _,root,hum=getChar()
@@ -2115,13 +3099,13 @@ local function progressionTick()
     end
     -- If we've made no XP and caught nothing on a higher island, back off one
     -- island temporarily. This avoids repeatedly failing catches on over-tier rods.
-    if index>1 and now-lastCatchAt>155 then
+    if not override and index>1 and now-lastCatchAt>155 then
         routeCooldownUntil[desired]=now+360
         local prev=LEVEL_ROUTE[index-1].name
         notify("No catch/XP progress for 155s. Trying "..prev.." for 6 minutes.")
         lastCatchAt=now
         lastAutoRoute=0
-    elseif index==1 and now-lastCatchAt>180 then
+    elseif not override and index==1 and now-lastCatchAt>180 then
         progressionStatus="Stalled: check tutorial / rod / reel / inventory"
         if now-lastAutoHealthCheck>120 then
             lastAutoHealthCheck=now
@@ -2173,11 +3157,13 @@ track(RunService.Heartbeat:Connect(function()
                 if hub.running then startBoss(state.autoLong and "Long Diaohai" or "Enzo") end
             end)
         end
-    elseif state.autoCast and not isShopping() and not buyerTripActive()
+    elseif state.autoCast and now>=(hub.manualTravelUntil or 0)
+        and not (state.autoQuests and ext.questTracker.sageRoute=="Battlefield Isle")
+        and not isShopping() and not buyerTripActive()
         and not sellTracker.pending and char and now - lastCast > math.max(0.4, state.castDelay)
         and now - lastFishingEnd > math.max(0.4, state.castDelay) then
         local p=profile()
-        local island=routeChoice(p)
+        local island=ext.activeFarmOverride() or routeChoice(p)
         local root=char:FindFirstChild("HumanoidRootPart")
         if not root then
             lastCast=now
@@ -2273,11 +3259,11 @@ task.spawn(function()
     while hub.running do
         local now = os.clock()
         checkSellResult()
-        if state.autoSell and not isShopping() then buyerTick() end
+        if state.autoSell and now>=(hub.manualTravelUntil or 0) and not isShopping() then buyerTick() end
         local _, bagCount, bagMax = getInventory()
         local emergencySell = state.autoLevel and bagMax and bagMax>0
             and bagCount and bagCount>=bagMax-2 and now-lastSell>=12
-        if state.autoSell and not isShopping() and not buyerTripActive()
+        if state.autoSell and now>=(hub.manualTravelUntil or 0) and not isShopping() and not buyerTripActive()
             and not sellTracker.pending
             and (now-lastSell>=state.sellDelay or emergencySell) then
             local _,active=minigame()
@@ -2291,7 +3277,7 @@ task.spawn(function()
                 end
             end
         end
-        if state.stayIsland and not isShopping() and not buyerTripActive() and not state.autoEnzo and not state.autoLong and now - lastTP >= 5 then
+        if state.stayIsland and now>=(hub.manualTravelUntil or 0) and not isShopping() and not buyerTripActive() and not state.autoEnzo and not state.autoLong and now - lastTP >= 5 then
             lastTP = now
             local _, root = getChar()
             local _, active = minigame()
@@ -2317,11 +3303,31 @@ end)
 
 task.spawn(function()
     while hub.running do
+        local craftOK,craftError=pcall(ext.craftTick)
+        if not craftOK then ext.craftTracker.status="Craft error: "..tostring(craftError) end
+        local ok,err=pcall(ext.questTick)
+        if not ok then ext.questTracker.status="Quest error: "..tostring(err) end
+        local auxOK,auxError=pcall(ext.auxiliaryFarmTick)
+        if not auxOK then report("Quest/craft route issue: "..tostring(auxError)) end
+        local now=os.clock()
+        if now-ext.merchantTracker.lastScan>=5 then
+            ext.merchantTracker.lastScan=now
+            local scanned,scanError=pcall(ext.scanMerchants)
+            if not scanned then report("Merchant scan issue: "..tostring(scanError)) end
+        end
+        task.wait(3)
+    end
+end)
+
+task.spawn(function()
+    while hub.running do
         local b = scanBosses()
         local _, count, cap = getInventory()
         local weather = tostring(workspace:GetAttribute("Weather") or "Unknown")
         local p=profile()
         local route,power=routeChoice(p)
+        local override=ext.activeFarmOverride()
+        if override then route=override end
         local activeTime=math.max(1,(os.clock()-firstProfileAt)/3600)
         local gainRate=levelGained/activeTime
         statusTop.Text="Lv "..tostring(p.level or "?").."/"..state.targetLevel
@@ -2333,13 +3339,13 @@ task.spawn(function()
             .." | Snaps "..barGuard.corrections
             .." | Reel requests "..reelRequests
         if state.autoLevel then
-            headerSubtitle.Text="v2.3 | LEVEL ON | "..barGuard.status
+            headerSubtitle.Text="v2.4 | LEVEL ON | "..barGuard.status
             headerSubtitle.TextColor3=colors.accent
         elseif state.autoCast or state.autoReel or state.lockBar then
-            headerSubtitle.Text="v2.3 | FISHING ON | "..barGuard.status
+            headerSubtitle.Text="v2.4 | FISHING ON | "..barGuard.status
             headerSubtitle.TextColor3=colors.gold
         else
-            headerSubtitle.Text="v2.3 | idle | sea guard ready"
+            headerSubtitle.Text="v2.4 | sea guard / quests / craft"
             headerSubtitle.TextColor3=colors.muted
         end
         levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -2347,6 +3353,28 @@ task.spawn(function()
             .."\nPower "..tostring(power or "?").." | "..tostring(p.cash or "?").." Cash"
             .." | "..string.format("%.1f",gainRate).." Lv/h"
         local suggested=nextRodSuggestion(p)
+        questHUD.Text="Master "..(state.autoQuests and "ON" or "OFF")
+            .." | Sage: "..ext.questTracker.sage
+            .."\nTicket: "..ext.questTracker.ticketStatus
+            .."\nZeng: "..ext.questTracker.zengStatus
+            .."\nLive: "..ext.questTracker.side
+        local recipe=ext.CRAFT_PLAN[state.craftTarget]
+        local gathered,needed=0,#(recipe and recipe.fish or {})
+        for _,entry in ipairs(recipe and recipe.fish or {}) do
+            if (ext.ownedFishCount(entry.name) or 0)>=1 then gathered=gathered+1 end
+        end
+        craftHUD.Text=state.craftTarget.." ["..gathered.."/"..needed.."] "
+            ..(state.autoFarmMaterials and "FARM ON" or "FARM OFF")
+            .." | Weather "..weather.."\n"..ext.craftTracker.status
+            .."\nNext fish: "..tostring(ext.craftTracker.fish or "--")
+            .." | Craft attempts: "..ext.craftTracker.attempts
+        local merchantActive=false
+        for _,name in ipairs({"Maoshan","Taoist"}) do
+            local available=ext.merchantTracker[name]~=nil
+            merchantButtons[name].Visible=available and state.merchantAlerts
+            merchantActive=merchantActive or available
+        end
+        roamingPopup.Visible=merchantActive and state.merchantAlerts
         routeHUD.Text="Status: "..progressionStatus
             .."\nSea: "..facingTracker.status.." | Sell: "..sellTracker.status
             .."\nRod: "..rodShop.status
@@ -2355,7 +3383,7 @@ task.spawn(function()
     end
 end)
 
-notify("KITKIT HUB v2.3 loaded. Auto Level sells all fish, checks sea facing, and attempts one rod per island through the in-game shop UI.")
+notify("KITKIT HUB v2.4 ready: level/rod ladder + separate Sell / Quests / Craft + merchant tap-to-TP. Enable the modes you want.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
