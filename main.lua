@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.4 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.5 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
@@ -88,6 +88,11 @@ local lastBossTry = 0
 local lastTP = 0
 local lastFishingEnd = 0
 local lastAutoRoute = 0
+-- Explicit travel gate: Autolevel never casts until it has verified the intended dock.
+-- Kept independent of the rod-shop and quest/craft route state machines.
+hub.routeGate = {ready=false, island=nil, status="Idle", lastAttempt=-math.huge,
+    lastTeleport=0, attempts=0, confirms=0, blockedCasts=0, lastBlockedLog=0}
+
 local lastAutoLevelTick = 0
 local lastAutoHealthCheck = 0
 local lastCatchAt = os.clock()
@@ -112,7 +117,7 @@ local sellTracker = {status="Not attempted", attempts=0, confirmed=0, failed=0, 
 local facingTracker = {status="Waiting", checks=0, verified=0, fallbacks=0, lastAt=0, corrected=0, island="", failedCasts=0}
 local rodShop = {phase="idle", status="Waiting to save", target=nil, phaseAt=0,
     lastVisit=0, untilAt=0, savedReturn=nil, clicks=0, cashBefore=nil, lastShopTarget="",
-    failures={}, lastEquipAt=0}
+    failures={}, lastEquipAt=0, equipFailures=0, equipName="", equipStatus=""}
 local lastRhythm = 0
 local lastPhase2 = 0
 local lastSpeed = 0
@@ -201,7 +206,14 @@ local function teleportTo(cf, name)
     local char, root = getChar()
     if not cf or not char or not root then report("Teleport unavailable: character not ready"); return false end
     local ok = pcall(function() root.CFrame = cf end)
-    if ok then report("Teleported to " .. tostring(name or "target")) end
+    if ok then
+        if state.autoLevel then
+            -- Any external trip (buyer, shop, user teleport) invalidates the old dock.
+            hub.routeGate.ready=false
+            hub.routeGate.status="Checking location after teleport"
+        end
+        report("Teleported to " .. tostring(name or "target"))
+    end
     return ok
 end
 -- Check several points in front of the dock. Raycasts are advisory because
@@ -521,9 +533,8 @@ local function routeChoice(p)
             if power>=route.power then index=i end
         end
     end
-    -- On a fresh account, stay on tutorial island until roughly Level 10.
-    -- This is a conservative tutorial safeguard, not a claimed hard level gate.
-    if p.level and p.level < 10 then return "Beginning Isle",power,1 end
+    -- Islands are selected by the equipped rod's Power, not an invented level-10 gate.
+    -- Rods for the NEXT island may be sold there before the current rod can fish there.
     if not power then return "Beginning Isle",nil,1 end
     while index>1 and os.clock()<(routeCooldownUntil[LEVEL_ROUTE[index].name] or 0) do
         index=index-1
@@ -582,6 +593,15 @@ local function nextRodSuggestion(p)
         if item.power>current then return item end
     end
     return nil
+end
+-- Shows the next island/shop goal without pretending that buying the previous
+-- island's best rod meets the next island's minimum catch Power.
+function hub.nextIslandGoal(p)
+    local island,power,index=routeChoice(p)
+    local nextEntry=LEVEL_ROUTE[index+1]
+    local target=nextRodSuggestion(p)
+    return island, nextEntry and nextEntry.name or nil,
+        nextEntry and nextEntry.power or nil, target, power
 end
 
 -- Public October 2026 code trackers disagree on a few expired codes.
@@ -1007,6 +1027,32 @@ end
 local function buyerTripActive()
     return sellTracker.buyerPhase~="idle"
 end
+function hub.shopNeedsPause(p)
+    if not state.autoLevel or not state.autoBuyRod then return false,nil end
+    if rodShop.phase~="idle" and rodShop.phase~="cooldown" then
+        return true,"Rod shop: "..rodShop.phase
+    end
+    if rodShop.phase=="cooldown" and os.clock()<rodShop.untilAt then
+        return false,nil
+    end
+    if buyerTripActive() or sellTracker.pending or os.clock()<(hub.manualTravelUntil or 0) then
+        return false,nil
+    end
+    p=p or profile()
+    local owned,power=bestOwnedRod(p)
+    if power and power>(rodPower(p.rod) or 0) then
+        if (rodShop.equipFailures or 0)<3 then
+            return true,"Equip owned "..owned
+        end
+        return false,nil -- UI cannot equip it; continue farming with a diagnostic
+    end
+    local target=nextRodSuggestion(p)
+    if target and p.cash and p.cash>=target.cost and not ownedRod(target.name,p)
+        and (rodShop.failures[target.name] or 0)<2 then
+        return true,"Buy "..target.name.." at "..target.island
+    end
+    return false,nil
+end
 local function findFishBuyer()
     local _,root=getChar()
     if not root then return nil end
@@ -1140,22 +1186,34 @@ local function shopTick()
         if buyerTripActive() or sellTracker.pending or active or char:GetAttribute("Fishing") then return end
         local owned,power=bestOwnedRod(p)
         if power and power>(rodPower(p.rod) or 0) then
-            rodShop.status="Equip already-owned rod: "..owned
-            if now-rodShop.lastEquipAt>=15 then
+            if rodShop.equipName~=owned then
+                rodShop.equipName=owned
+                rodShop.equipFailures=0
+            end
+            if rodShop.equipFailures>=3 then
+                rodShop.status="Manual equip needed: "..owned.." (UI tried 3 times)"
+                return
+            end
+            rodShop.status="Equipping owned rod: "..owned
+            if now-rodShop.lastEquipAt>=8 then
                 local equipBtn=actionButtonForRod(owned,"equip")
                 local nav=not equipBtn and findInventoryNavigation() or nil
                 if equipBtn then
                     clickGameButton(equipBtn)
-                    rodShop.status="Equip pressed for "..owned.."; checking data"
+                    rodShop.status="Equip clicked: "..owned.."; checking replicated data"
                 elseif nav then
                     clickGameButton(nav)
-                    rodShop.status="Opening inventory for "..owned
+                    rodShop.status="Opened inventory for "..owned
                 else
-                    rodShop.status="Owned "..owned.."; equip in Inventory if needed"
+                    rodShop.status="Cannot find equip UI for "..owned
                 end
                 rodShop.lastEquipAt=now
+                rodShop.equipFailures=rodShop.equipFailures+1
             end
             return
+        else
+            rodShop.equipFailures=0
+            rodShop.equipName=""
         end
         local target=nextRodSuggestion(p)
         if not target then rodShop.status="All shop targets passed";return end
@@ -1181,7 +1239,7 @@ local function shopTick()
         local equip=actionButtonForRod(target.name,"equip")
         if equip then clickGameButton(equip) end
         finishRodShop("Owned "..target.name.."; "
-            ..(equip and "Equip clicked" or "open Inventory to equip"),25)
+            ..(equip and "Equip clicked" or "open Inventory to equip"),3)
         return
     end
     if now-rodShop.phaseAt>57 then
@@ -2013,6 +2071,107 @@ end
 return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
 end)()
 
+function hub.armAutoRoute()
+    hub.routeGate.ready=false
+    hub.routeGate.island=nil
+    hub.routeGate.status="Locating fishing island"
+    hub.routeGate.lastAttempt=-math.huge
+    hub.routeGate.lastTeleport=0
+    lastAutoLevelTick=-math.huge -- first route evaluation must run before the first cast
+    lastAutoRoute=0
+end
+function hub.dockDistance(root, cf)
+    local p=root.Position
+    local t=cf.Position
+    local x,z=p.X-t.X,p.Z-t.Z
+    return math.sqrt(x*x+z*z),math.abs(p.Y-t.Y)
+end
+function hub.routeReadyForCast(island)
+    if not state.autoLevel or not state.autoRoute then return true end
+    if not hub.routeGate.ready or hub.routeGate.island~=island then return false end
+    local _,root,hum=getChar()
+    local cf=cframeIsland(island)
+    if not root or not hum or hum.Health<=0 or not cf then return false end
+    local horizontal,vertical=hub.dockDistance(root,cf)
+    if horizontal>80 or vertical>65 then
+        hub.routeGate.ready=false
+        hub.routeGate.status="Moved away from "..island
+        return false
+    end
+    return true
+end
+function hub.routeTravelTick(now,island)
+    if not state.autoRoute then
+        hub.routeGate.ready=true
+        hub.routeGate.status="Auto route disabled"
+        return
+    end
+    if hub.routeGate.island~=island then
+        hub.routeGate.island=island
+        hub.routeGate.ready=false
+        hub.routeGate.lastAttempt=-math.huge
+        hub.routeGate.status="Routing to "..island
+    end
+    local char,root,hum=getChar()
+    local cf=cframeIsland(island)
+    if not cf then
+        hub.routeGate.ready=false
+        hub.routeGate.status="No known safe dock for "..island
+        return
+    end
+    if not root or not hum or hum.Health<=0 then
+        hub.routeGate.ready=false
+        hub.routeGate.status="Waiting for character"
+        return
+    end
+    if now<(hub.manualTravelUntil or 0) then
+        hub.routeGate.ready=false
+        hub.routeGate.status="Manual teleport active"
+        return
+    end
+    if isShopping() or buyerTripActive() or sellTracker.pending then
+        hub.routeGate.ready=false
+        hub.routeGate.status=isShopping() and "Waiting for rod shop" or "Waiting for fish sale"
+        return
+    end
+    local horizontal,vertical=hub.dockDistance(root,cf)
+    if horizontal>80 or vertical>65 then
+        hub.routeGate.ready=false
+        local _,active=minigame()
+        if active or char:GetAttribute("Fishing") then
+            hub.routeGate.status="Finishing catch before travel to "..island
+            return
+        end
+        if now-hub.routeGate.lastAttempt>=2.5 then
+            hub.routeGate.lastAttempt=now
+            hub.routeGate.attempts=hub.routeGate.attempts+1
+            local success=teleportTo(cf,island.." dock")
+            if success then
+                hub.routeGate.lastTeleport=now
+                hub.routeGate.status="Teleported to "..island.."; verifying"
+            else
+                hub.routeGate.status="Teleport failed; retrying"
+            end
+        else
+            hub.routeGate.status="Waiting for teleport to "..island
+        end
+        return
+    end
+    if now-hub.routeGate.lastTeleport<0.25 then
+        hub.routeGate.ready=false
+        hub.routeGate.status="Landing at "..island
+        return
+    end
+    if state.autoSeaFacing and not faceSea(island,true) then
+        hub.routeGate.ready=false
+        hub.routeGate.status="Waiting for safe sea-facing angle"
+        return
+    end
+    hub.routeGate.ready=true
+    hub.routeGate.confirms=hub.routeGate.confirms+1
+    hub.routeGate.status="Ready at "..island
+end
+
 -- GUI creation. Built with Roblox instances; no remote UI code.
 local container = PlayerGui
 pcall(function()
@@ -2029,11 +2188,11 @@ if not parented then GUI.Parent = PlayerGui end
 hub.gui = GUI
 
 local colors = {
-    bg = Color3.fromRGB(15, 20, 30), panel = Color3.fromRGB(26, 34, 48),
-    row = Color3.fromRGB(33, 43, 58), outline = Color3.fromRGB(61, 75, 93),
-    accent = Color3.fromRGB(81, 217, 193), gold = Color3.fromRGB(246, 185, 87),
-    white = Color3.fromRGB(241, 246, 252), muted = Color3.fromRGB(165, 178, 198),
-    red = Color3.fromRGB(222, 91, 93),
+    bg = Color3.fromRGB(15, 18, 24), panel = Color3.fromRGB(21, 25, 32),
+    row = Color3.fromRGB(29, 33, 41), outline = Color3.fromRGB(65, 73, 84),
+    accent = Color3.fromRGB(165, 209, 200), gold = Color3.fromRGB(177, 169, 147),
+    white = Color3.fromRGB(226, 231, 235), muted = Color3.fromRGB(143, 153, 166),
+    red = Color3.fromRGB(182, 103, 105),
 }
 local function make(class, parent, props)
     local obj = Instance.new(class)
@@ -2046,73 +2205,76 @@ local function edge(o, color)
     make("UIStroke", o, { Color = color or colors.outline, Thickness = 1, Transparency = 0.28 })
 end
 local compact = UIS.TouchEnabled and not UIS.KeyboardEnabled
-local width = compact and 354 or 455
-local height = compact and 388 or 445
+local width = compact and 310 or 344
+local height = compact and 356 or 386
 local main = make("Frame", GUI, {
     Name = "Window", BackgroundColor3 = colors.bg, BorderSizePixel = 0,
-    Size = UDim2.fromOffset(width, height), Position = UDim2.new(0.5, -width/2, 0.5, -height/2),
-    ClipsDescendants = true, Active = true,
+    Size = UDim2.fromOffset(width, height), Position = UDim2.fromOffset(60, 81),
+    ClipsDescendants = true, Active = true, Visible = false,
 })
-round(main, 13); edge(main)
-local header = make("Frame", main, { BackgroundColor3 = colors.panel, Size = UDim2.new(1, 0, 0, 49), BorderSizePixel = 0, Active = true })
+round(main, 10); edge(main)
+local header = make("Frame", main, {
+    BackgroundColor3 = colors.panel, Size = UDim2.new(1, 0, 0, 46),
+    BorderSizePixel = 0, Active = true,
+})
 local title = make("TextLabel", header, {
-    BackgroundTransparency = 1, Text = "KITKIT / HEAVYWEIGHT", TextXAlignment = Enum.TextXAlignment.Left,
-    Font = Enum.Font.GothamBold, TextSize = compact and 15 or 17, TextColor3 = colors.accent,
-    Position = UDim2.fromOffset(14, 5), Size = UDim2.new(1, -107, 0, 24),
+    BackgroundTransparency = 1, Text = "KITKIT", TextXAlignment = Enum.TextXAlignment.Left,
+    Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = colors.white,
+    Position = UDim2.fromOffset(12, 5), Size = UDim2.new(1, -58, 0, 21),
 })
 local headerSubtitle = make("TextLabel", header, {
-    BackgroundTransparency = 1, Text = "v2.4 | rods | quests | crafting", TextXAlignment = Enum.TextXAlignment.Left,
-    Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = colors.muted,
-    Position = UDim2.fromOffset(14, 28), Size = UDim2.new(1, -107, 0, 16),
+    BackgroundTransparency = 1, Text = "HEAVYWEIGHT  /  2.5", TextXAlignment = Enum.TextXAlignment.Left,
+    Font = Enum.Font.GothamMedium, TextSize = 9, TextColor3 = colors.muted,
+    Position = UDim2.fromOffset(12, 26), Size = UDim2.new(1, -58, 0, 13),
 })
-local minButton = make("TextButton", header, {
-    Text = "_", Font = Enum.Font.GothamBold, TextSize = 19, TextColor3 = colors.white,
-    BackgroundColor3 = colors.row, Size = UDim2.fromOffset(30, 29),
-    Position = UDim2.new(1, -75, 0, 10),
-})
-round(minButton, 6)
 local closeButton = make("TextButton", header, {
-    Text = "X", Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = colors.white,
-    BackgroundColor3 = colors.red, Size = UDim2.fromOffset(30, 29),
-    Position = UDim2.new(1, -39, 0, 10),
+    Text = "x", Font = Enum.Font.GothamMedium, TextSize = 14, TextColor3 = colors.muted,
+    BackgroundColor3 = colors.panel, Size = UDim2.fromOffset(27, 27),
+    Position = UDim2.new(1, -38, 0, 9), BorderSizePixel = 0,
 })
 round(closeButton, 6)
 local tabBar = make("ScrollingFrame", main, {
     BackgroundTransparency = 1, BorderSizePixel=0,
-    Size = UDim2.new(1, -16, 0, 39), Position = UDim2.fromOffset(8, 54),
-    ScrollBarThickness = 2, ScrollingDirection=Enum.ScrollingDirection.X,
+    Size = UDim2.new(1, -16, 0, 33), Position = UDim2.fromOffset(8, 50),
+    ScrollBarThickness = 1, ScrollingDirection=Enum.ScrollingDirection.X,
     AutomaticCanvasSize=Enum.AutomaticSize.X, CanvasSize=UDim2.new(),
 })
 local tabList = make("UIListLayout", tabBar, {
-    FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Center,
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 5),
+    FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Left,
+    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
 })
 local content = make("Frame", main, {
-    BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 97),
-    Size = UDim2.new(1, -20, 1, -159),
+    BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 89),
+    Size = UDim2.new(1, -16, 1, -135),
 })
 local footer = make("Frame", main, {
-    BackgroundColor3 = colors.panel, Position = UDim2.new(0, 0, 1, -58),
-    Size = UDim2.new(1, 0, 0, 58), BorderSizePixel = 0,
+    BackgroundColor3 = colors.panel, Position = UDim2.new(0, 0, 1, -42),
+    Size = UDim2.new(1, 0, 0, 42), BorderSizePixel = 0,
 })
 local statusTop = make("TextLabel", footer, {
     BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
     Text = "Weather: -- | Bag: -- | Boss: --", TextColor3 = colors.accent,
-    TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
-    Position = UDim2.fromOffset(12, 7), Size = UDim2.new(1, -24, 0, 18),
+    TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+    Position = UDim2.fromOffset(11, 3), Size = UDim2.new(1, -22, 0, 17),
 })
 local statusBottom = make("TextLabel", footer, {
     BackgroundTransparency = 1, Font = Enum.Font.Gotham,
     Text = "Ready", TextColor3 = colors.muted, TextWrapped = true,
-    TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
-    Position = UDim2.fromOffset(12, 25), Size = UDim2.new(1, -24, 0, 30),
+    TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left,
+    Position = UDim2.fromOffset(11, 20), Size = UDim2.new(1, -22, 0, 18),
 })
 local bubble = make("TextButton", GUI, {
-    Text = "KK", Font = Enum.Font.GothamBold, TextSize = 13,
-    BackgroundColor3 = colors.panel, TextColor3 = colors.accent,
-    Size = UDim2.fromOffset(41, 41), Position = UDim2.new(0, 14, 0.4, 0), Visible = false,
+    Name = "KLauncher", Text = "K", Font = Enum.Font.GothamBold, TextSize = 15,
+    BackgroundColor3 = colors.panel, TextColor3 = colors.white, AutoButtonColor = false,
+    Size = UDim2.fromOffset(32, 32), Position = UDim2.fromOffset(16, 85), Visible = true,
+    BorderSizePixel = 0,
 })
-round(bubble, 12); edge(bubble, colors.accent)
+round(bubble, 9); edge(bubble, colors.outline)
+hub.bubbleDot=make("Frame", bubble, {
+    BorderSizePixel=0, BackgroundColor3=colors.muted,
+    Size=UDim2.fromOffset(5,5), Position=UDim2.new(1,-8,0,4),
+})
+round(hub.bubbleDot, 5)
 
 -- Dragging via titlebar, compatible with mouse and touch.
 local dragging, dragStart, startPosition, dragInput = false, nil, nil, nil
@@ -2151,17 +2313,17 @@ local function activate(name)
     activeTab = name
     for tabName, page in pairs(pages) do page.Visible = tabName == name end
     for tabName, btn in pairs(tabs) do
-        btn.BackgroundColor3 = tabName == name and colors.accent or colors.panel
-        btn.TextColor3 = tabName == name and colors.bg or colors.muted
+        btn.BackgroundColor3 = tabName == name and colors.row or colors.panel
+        btn.TextColor3 = tabName == name and colors.white or colors.muted
     end
 end
 local function createTab(name)
     local btn = make("TextButton", tabBar, {
         BackgroundColor3 = colors.panel, TextColor3 = colors.muted,
-        Text = name, TextSize = compact and 10 or 12, Font = Enum.Font.GothamBold,
-        Size = UDim2.fromOffset(compact and 69 or 79,32), BorderSizePixel = 0,
+        Text = name, TextSize = 10, Font = Enum.Font.GothamMedium,
+        Size = UDim2.fromOffset((#name>5 and 63 or 48),28), BorderSizePixel = 0,
     })
-    round(btn, 7)
+    round(btn, 5)
     tabs[name] = btn
     track(btn.MouseButton1Click:Connect(function() activate(name) end))
     local scroll = make("ScrollingFrame", content, {
@@ -2195,26 +2357,27 @@ local extraPage = createTab("Other")
 local function section(parent, name)
     make("TextLabel", parent, {
         BackgroundTransparency = 1, Text = name:upper(), TextXAlignment = Enum.TextXAlignment.Left,
-        Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = colors.gold,
-        Size = UDim2.new(1, -4, 0, 22),
+        Font = Enum.Font.GothamMedium, TextSize = 9, TextColor3 = colors.muted,
+        Size = UDim2.new(1, -4, 0, 19),
     })
 end
 local function rowBase(parent, h)
     local row = make("Frame", parent, {
-        BackgroundColor3 = colors.row, BorderSizePixel = 0,
-        Size = UDim2.new(1, -4, 0, h or 36),
+        BackgroundColor3 = colors.panel, BorderSizePixel = 0,
+        Size = UDim2.new(1, -4, 0, h or 32),
     })
-    round(row, 7)
+    round(row, 5)
     return row
 end
 local function action(parent, label, fn, important)
     local btn = make("TextButton", parent, {
-        Text = label, TextColor3 = important and colors.bg or colors.white,
-        BackgroundColor3 = important and colors.accent or colors.row,
-        Font = Enum.Font.GothamMedium, TextSize = compact and 11 or 12,
-        Size = UDim2.new(1, -4, 0, 35), TextWrapped = true, BorderSizePixel = 0,
+        Text = label, TextColor3 = important and colors.accent or colors.white,
+        BackgroundColor3 = important and colors.row or colors.panel,
+        Font = Enum.Font.GothamMedium, TextSize = 10,
+        Size = UDim2.new(1, -4, 0, 31), TextWrapped = true, BorderSizePixel = 0,
     })
-    round(btn, 7)
+    round(btn, 5)
+    if important then edge(btn, colors.outline) end
     track(btn.MouseButton1Click:Connect(function()
         if not hub.running then return end
         local ok, err = pcall(fn, btn)
@@ -2223,21 +2386,22 @@ local function action(parent, label, fn, important)
     return btn
 end
 local function toggle(parent, label, key, onChange)
-    local row = rowBase(parent, 36)
+    local row = rowBase(parent, 32)
     make("TextLabel", row, {
         Text = label, BackgroundTransparency = 1, TextXAlignment = Enum.TextXAlignment.Left,
-        TextColor3 = colors.white, Font = Enum.Font.GothamMedium, TextSize = compact and 11 or 12,
-        Size = UDim2.new(1, -89, 1, 0), Position = UDim2.fromOffset(10, 0),
+        TextColor3 = colors.white, Font = Enum.Font.GothamMedium, TextSize = 10,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Size = UDim2.new(1, -66, 1, 0), Position = UDim2.fromOffset(8, 0),
     })
     local btn = make("TextButton", row, {
-        Size = UDim2.fromOffset(62, 26), Position = UDim2.new(1, -70, 0.5, -13),
-        TextSize = 11, Font = Enum.Font.GothamBold, BorderSizePixel = 0,
+        Size = UDim2.fromOffset(44, 21), Position = UDim2.new(1, -51, 0.5, -10),
+        TextSize = 9, Font = Enum.Font.GothamMedium, BorderSizePixel = 0,
     })
-    round(btn, 6)
+    round(btn, 10)
     local function refresh()
         btn.Text = state[key] and "ON" or "OFF"
         btn.TextColor3 = state[key] and colors.bg or colors.muted
-        btn.BackgroundColor3 = state[key] and colors.accent or colors.panel
+        btn.BackgroundColor3 = state[key] and colors.accent or colors.row
     end
     callbacks[key] = refresh
     refresh()
@@ -2250,7 +2414,7 @@ local function stepper(parent, label, key, minVal, maxVal, jump, suffix)
     local row = rowBase(parent, 36)
     make("TextLabel", row, {
         Text = label, BackgroundTransparency = 1, TextXAlignment = Enum.TextXAlignment.Left,
-        TextColor3 = colors.white, Font = Enum.Font.GothamMedium, TextSize = compact and 11 or 12,
+        TextColor3 = colors.white, Font = Enum.Font.GothamMedium, TextSize = 10,
         Size = UDim2.new(1, -144, 1, 0), Position = UDim2.fromOffset(10, 0),
     })
     local minus = make("TextButton", row, {
@@ -2287,21 +2451,24 @@ end
 local levelingHUD=make("TextLabel",levelPage,{
     BackgroundColor3=colors.panel,TextColor3=colors.accent,
     Font=Enum.Font.GothamBold,TextSize=compact and 11 or 13,
-    Text="Lv ?/500 | Rod ? | Power ?",TextWrapped=true,
-    Size=UDim2.new(1,-4,0,58),
+    Text="Level --  /  Rod --",TextWrapped=true,
+    TextXAlignment=Enum.TextXAlignment.Left,
+    Size=UDim2.new(1,-4,0,44),
 })
 round(levelingHUD,8)
 local routeHUD=make("TextLabel",levelPage,{
     BackgroundTransparency=1,TextColor3=colors.muted,
     TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
     Font=Enum.Font.Gotham,TextSize=11,TextWrapped=true,
-    Text="Status: idle\nNext upgrade: --",Size=UDim2.new(1,-4,0,145),
+    Text="Route: idle\nNext upgrade: --",Size=UDim2.new(1,-4,0,105),
 })
 section(levelPage,"Fresh account: XP / cash farming")
 local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
     local active=not state.autoLevel
     setState("autoLevel",active)
     if active then
+        setState("autoRoute",true)
+        hub.armAutoRoute()
         for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
             setState(k,true)
         end
@@ -2320,6 +2487,8 @@ local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
         progressionStatus="Farming started. Selling and quests are separate switches."
         report("Auto Level ON. Use Auto Sell and Auto Quests separately or the QUICK START preset.")
     else
+        hub.routeGate.ready=false
+        hub.routeGate.status="Leveling stopped"
         for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
             setState(k,false)
         end
@@ -2337,6 +2506,8 @@ end,true)
 action(levelPage,"QUICK START: LEVEL + SELL + QUESTS",function()
     -- Convenience preset; all three remain individually toggleable.
     if not state.autoLevel then
+        setState("autoRoute",true)
+        hub.armAutoRoute()
         setState("autoLevel",true)
         for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do setState(k,true) end
         levelBtn.Text="STOP AUTO LEVEL"
@@ -2412,7 +2583,7 @@ local questHUD=make("TextLabel",questPage,{
     Font=Enum.Font.Gotham,TextSize=compact and 10 or 11,
     Text="Quest engine OFF",TextWrapped=true,
     TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
-    Size=UDim2.new(1,-4,0,123),
+    Size=UDim2.new(1,-4,0,99),
 })
 round(questHUD,7)
 toggle(questPage,"AUTO QUESTS (master, separate)","autoQuests",function(v)
@@ -2476,7 +2647,7 @@ local craftHUD=make("TextLabel",craftPage,{
     Font=Enum.Font.Gotham,TextSize=compact and 10 or 11,
     Text="Crafting OFF",TextWrapped=true,
     TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
-    Size=UDim2.new(1,-4,0,123),
+    Size=UDim2.new(1,-4,0,99),
 })
 round(craftHUD,7)
 action(craftPage,"TARGET ROD: Heavenpiercer Rod",function(btn)
@@ -2663,24 +2834,24 @@ action(worldPage,"TP TO TAOIST (if spawned)",function() ext.tpMerchant("Taoist")
 -- Clickable toast stays visible even when the main window is minimized.
 local roamingPopup=make("Frame",GUI,{
     Name="MerchantAlerts", BackgroundColor3=colors.panel,BorderSizePixel=0,
-    Position=UDim2.new(1,-246,0,95), Size=UDim2.fromOffset(230,100),
+    Position=UDim2.new(1,-205,0,93), Size=UDim2.fromOffset(193,86),
     Visible=false, ZIndex=20,
 })
 round(roamingPopup,9);edge(roamingPopup,colors.gold)
 make("TextLabel",roamingPopup,{
-    Text="ROAMING NPC DETECTED - TAP TO TP",TextColor3=colors.gold,
+    Text="MERCHANT NEARBY",TextColor3=colors.accent,
     BackgroundTransparency=1,TextSize=10,Font=Enum.Font.GothamBold,
-    Size=UDim2.new(1,-8,0,25),Position=UDim2.fromOffset(4,1),ZIndex=21,
+    Size=UDim2.new(1,-16,0,22),Position=UDim2.fromOffset(8,2),ZIndex=21,
 })
 local merchantButtons={}
 for i,name in ipairs({"Maoshan","Taoist"}) do
     local btn=make("TextButton",roamingPopup,{
-        Text=name:upper().."   |   TELEPORT",BackgroundColor3=colors.row,
-        TextColor3=colors.white,Font=Enum.Font.GothamBold,TextSize=12,
-        Position=UDim2.fromOffset(8,27+(i-1)*35),
-        Size=UDim2.new(1,-16,0,29),Visible=false,ZIndex=21,
+        Text=name.."   /   teleport",BackgroundColor3=colors.row,
+        TextColor3=colors.white,Font=Enum.Font.GothamMedium,TextSize=10,
+        Position=UDim2.fromOffset(7,25+(i-1)*29),
+        Size=UDim2.new(1,-14,0,26),Visible=false,ZIndex=21,
     })
-    round(btn,6)
+    round(btn,5)
     merchantButtons[name]=btn
     track(btn.MouseButton1Click:Connect(function() ext.tpMerchant(name) end))
 end
@@ -2792,7 +2963,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.4 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.5 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
@@ -2800,6 +2971,10 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
         reelDiagnostics(),
         "Known code attempts="..tostring((function() local n=0 for _ in pairs(codesAttempted) do n=n+1 end return n end)()),
         "Mode="..tostring(state.autoLevel).." State="..progressionStatus,
+        "RouteGate="..hub.routeGate.status.." Island="..tostring(hub.routeGate.island)
+            .." Ready="..tostring(hub.routeGate.ready).." TPAttempts="..hub.routeGate.attempts
+            .." ReadyChecks="..hub.routeGate.confirms.." BlockedCasts="..hub.routeGate.blockedCasts,
+        "NextIslandGoal="..tostring(select(2,hub.nextIslandGoal(p))),
         "Sea="..facingTracker.status.." Checks="..facingTracker.checks
             .." Verified="..facingTracker.verified.." Adjusted="..facingTracker.corrected
             .." FailedCasts="..facingTracker.failedCasts,
@@ -2829,23 +3004,31 @@ end)
 
 action(extraPage, "UNLOAD HUB + STOP ALL LOOPS", function() hub:Unload() end)
 
-local minimized = false
-local function minimize(v)
-    minimized = v
-    tabBar.Visible = not v
-    content.Visible = not v
-    footer.Visible = not v
-    main.Size = UDim2.fromOffset(width, v and 49 or height)
-    minButton.Text = v and "+" or "_"
+hub.uiToggleKey = Enum.KeyCode.K
+hub.waitingForBind = false
+-- Keybind control stored on hub
+hub.keybindButton=action(extraPage,"MENU KEYBIND  /  K",function(btn)
+    hub.waitingForBind=true
+    btn.Text="Press any keyboard key..."
+end)
+function hub.toggleMenu()
+    main.Visible=not main.Visible
 end
-track(minButton.MouseButton1Click:Connect(function() minimize(not minimized) end))
-track(closeButton.MouseButton1Click:Connect(function() hub:Unload() end))
-track(bubble.MouseButton1Click:Connect(function() main.Visible = true; bubble.Visible = false end))
+track(closeButton.MouseButton1Click:Connect(function() main.Visible=false end))
+track(bubble.MouseButton1Click:Connect(hub.toggleMenu))
 track(UIS.InputBegan:Connect(function(input, processed)
-    if not processed and input.KeyCode == Enum.KeyCode.RightShift then
-        main.Visible = not main.Visible
-        bubble.Visible = not main.Visible
+    if not hub.running then return end
+    if input.UserInputType~=Enum.UserInputType.Keyboard then return end
+    if UIS:GetFocusedTextBox() then return end
+    if hub.waitingForBind then
+        hub.waitingForBind=false
+        if input.KeyCode~=Enum.KeyCode.Unknown then
+            hub.uiToggleKey=input.KeyCode
+        end
+        hub.keybindButton.Text="MENU KEYBIND  /  "..hub.uiToggleKey.Name:upper()
+        return
     end
+    if not processed and input.KeyCode==hub.uiToggleKey then hub.toggleMenu() end
 end))
 activate("Level")
 
@@ -3034,6 +3217,8 @@ local function trackInventory()
 end
 local function stopAutoLevel(reason)
     state.autoLevel=false
+    hub.routeGate.ready=false
+    hub.routeGate.status="Leveling stopped"
     for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
         setState(k,false)
     end
@@ -3081,22 +3266,15 @@ local function progressionTick()
     elseif not power then
         progressionStatus="Rod Power unknown: staying on Beginning Isle"
     else
-        progressionStatus="Farming "..desired.." (Power "..power..")"
-    end
-    if state.autoRoute and now>=(hub.manualTravelUntil or 0)
-        and not isShopping() and not buyerTripActive()
-        and not sellTracker.pending and (now-lastAutoRoute>=12) then
-        lastAutoRoute=now
-        local _,root,hum=getChar()
-        local _,active=minigame()
-        local cf=cframeIsland(desired)
-        if root and hum and hum.Health>0 and not active and not root.Parent:GetAttribute("Fishing") and cf
-            and (root.Position-cf.Position).Magnitude>230 then
-            teleportTo(cf,desired)
-            facingTracker.lastAt=0
-            lastCatchAt=now
+        local _,nextIsland,required,nextTarget=hub.nextIslandGoal(p)
+        if nextIsland and power<required then
+            progressionStatus=desired.." (Power "..power..") | Next "..nextIsland
+                .." needs "..required.." | "..(nextTarget and ("Save for "..nextTarget.name) or "Upgrade rod")
+        else
+            progressionStatus="Farming "..desired.." (Power "..power..")"
         end
     end
+    hub.routeTravelTick(now,desired)
     -- If we've made no XP and caught nothing on a higher island, back off one
     -- island temporarily. This avoids repeatedly failing catches on over-tier rods.
     if not override and index>1 and now-lastCatchAt>155 then
@@ -3165,7 +3343,14 @@ track(RunService.Heartbeat:Connect(function()
         local p=profile()
         local island=ext.activeFarmOverride() or routeChoice(p)
         local root=char:FindFirstChild("HumanoidRootPart")
+        local shopPause,shopReason=hub.shopNeedsPause(p)
         if not root then
+            lastCast=now
+        elseif shopPause then
+            hub.routeGate.status=shopReason or "Rod upgrade queued"
+            lastCast=now
+        elseif not hub.routeReadyForCast(island) then
+            hub.routeGate.blockedCasts=hub.routeGate.blockedCasts+1
             lastCast=now
         elseif state.autoSeaFacing and not faceSea(island,false) then
             lastCast=now
@@ -3330,22 +3515,22 @@ task.spawn(function()
         if override then route=override end
         local activeTime=math.max(1,(os.clock()-firstProfileAt)/3600)
         local gainRate=levelGained/activeTime
-        statusTop.Text="Lv "..tostring(p.level or "?").."/"..state.targetLevel
-            .." | Bag "..tostring(count or "?").."/"..tostring(cap or "?")
-            .." | "..weather.." | Boss "..b.count
+        statusTop.Text="Lv "..tostring(p.level or "?").."  /  Bag "..tostring(count or "?").."/"..tostring(cap or "?")
+            .."  /  "..weather
         weatherLabel.Text="Current weather: "..weather
         statusBottom.Text=lastAction
+        hub.bubbleDot.BackgroundColor3=(state.autoLevel or state.autoCast) and colors.accent or colors.muted
         reelStatusHUD.Text="BAR GUARD: "..barGuard.status
             .." | Snaps "..barGuard.corrections
             .." | Reel requests "..reelRequests
         if state.autoLevel then
-            headerSubtitle.Text="v2.4 | LEVEL ON | "..barGuard.status
+            headerSubtitle.Text="LEVELING  /  "..barGuard.status
             headerSubtitle.TextColor3=colors.accent
         elseif state.autoCast or state.autoReel or state.lockBar then
-            headerSubtitle.Text="v2.4 | FISHING ON | "..barGuard.status
+            headerSubtitle.Text="FISHING  /  "..barGuard.status
             headerSubtitle.TextColor3=colors.gold
         else
-            headerSubtitle.Text="v2.4 | sea guard / quests / craft"
+            headerSubtitle.Text="HEAVYWEIGHT  /  2.5"
             headerSubtitle.TextColor3=colors.muted
         end
         levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -3375,15 +3560,15 @@ task.spawn(function()
             merchantActive=merchantActive or available
         end
         roamingPopup.Visible=merchantActive and state.merchantAlerts
-        routeHUD.Text="Status: "..progressionStatus
-            .."\nSea: "..facingTracker.status.." | Sell: "..sellTracker.status
-            .."\nRod: "..rodShop.status
-            .."\nTarget: "..(suggested and (suggested.name.." ("..suggested.cost.." Cash)") or "Complete")
+        routeHUD.Text="ROUTE  /  "..hub.routeGate.status
+            .."\n"..progressionStatus
+            .."\nSHOP  /  "..rodShop.status
+            .."\nNEXT  /  "..(suggested and (suggested.name.." ("..suggested.cost.." Cash)") or "Complete")
         task.wait(3)
     end
 end)
 
-notify("KITKIT HUB v2.4 ready: level/rod ladder + separate Sell / Quests / Craft + merchant tap-to-TP. Enable the modes you want.")
+report("KITKIT v2.5 ready. Click the small K icon or press K to open the menu.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
