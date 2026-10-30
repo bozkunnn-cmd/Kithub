@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.7 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.8.1 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
@@ -46,19 +46,19 @@ if type(env.KITKIT_HeavyweightFishing) == "table" and type(env.KITKIT_Heavyweigh
     pcall(function() env.KITKIT_HeavyweightFishing:Unload() end)
 end
 
-local hub = { running = true, connections = {}, esp = {}, touched = {}, originals = {}, manualTravelUntil=0 }
+local hub = { running = true, connections = {}, esp = {}, touched = {}, originals = {}, manualTravelUntil=0, questManagedFlags={}, questAutomationChanging=false }
 env.KITKIT_HeavyweightFishing = hub
 
 local state = {
     autoLevel = false, autoRoute = true, autoFavorite = true,
     autoBuyRod = true, autoSeaFacing = true,
-    autoCodes = true, autoDailyQuest = true,
+    autoCodes = true, autoDailyQuest = false,
     autoQuests = false, autoTicketQuests = false, autoZengQuest = false,
-    autoSageAfterAmber = true, ticketQuestMode = "Easy",
+    autoSageAfterAmber = false, ticketQuestMode = "Easy",
     autoCraftRod = false, autoFarmMaterials = false, autoCraftBait = false,
     protectMaterials = true, craftTarget = "Heavenpiercer Rod",
     merchantAlerts = true,
-    fastSell = false, targetLevel = 500,
+    targetLevel = 500,
     autoCast = false, autoReel = false, lockBar = false,
     autoSkill = false, slam = false, charge = false,
     rhythm = false, phase2 = false, autoSell = false,
@@ -72,6 +72,14 @@ local state = {
     selectedIsland = "Beginning Isle",
 }
 local callbacks = {}
+local function refreshCallbacks(key)
+    local registered=callbacks[key]
+    if type(registered)=="function" then
+        pcall(registered)
+    elseif type(registered)=="table" then
+        for _,fn in ipairs(registered) do pcall(fn) end
+    end
+end
 local lastAction = "Ready | Everything that spends money is disabled."
 local lastWeather = tostring(workspace:GetAttribute("Weather") or "Unknown")
 local lastSecretSignature = ""
@@ -87,7 +95,6 @@ local lastSell = os.clock()
 local lastBossTry = 0
 local lastTP = 0
 local lastFishingEnd = 0
-local lastAutoRoute = 0
 -- Explicit travel gate: Autolevel never casts until it has verified the intended dock.
 -- Kept independent of the rod-shop and quest/craft route state machines.
 hub.routeGate = {ready=false, island=nil, status="Idle", lastAttempt=-math.huge,
@@ -98,23 +105,21 @@ local lastAutoHealthCheck = 0
 local lastCatchAt = os.clock()
 local lastProfileLevel = nil
 local lastProfileXP = nil
-local levelGainAt = os.clock()
 local firstProfileAt = os.clock()
 local levelGained = 0
 local lastCodeRequest = 0
 local codesAttempted = {}
 local lastDailyQuestClaim = 0
 local lastRodPrompt = ""
-local favoriteAttempts = {}
+local favoriteAttempts = setmetatable({}, { __mode = "k" })
+local fishDecoder = nil
+local fishMetadata -- populated by the verified recipe engine (declared later)
 local isCraftIngredient -- populated by the verified recipe engine (declared later)
 local routeCooldownUntil = {}
-local recoveryAttempts = 0
-local catchesThisSession = 0
-local lastBagSize = nil
 local progressionStatus = "Idle"
 local sellTracker = {status="Not attempted", attempts=0, confirmed=0, failed=0, pending=nil, lastResult=0,
     streak=0, buyerPhase="idle", buyerAt=0, lastBuyerTrip=0, returnCF=nil}
-local facingTracker = {status="Waiting", checks=0, verified=0, fallbacks=0, lastAt=0, corrected=0, island="", failedCasts=0}
+local facingTracker = {status="Waiting", checks=0, verified=0, fallbacks=0, lastAt=0, corrected=0, island="", direction=nil, failedCasts=0}
 local rodShop = {phase="idle", status="Waiting to save", target=nil, phaseAt=0,
     lastVisit=0, untilAt=0, savedReturn=nil, clicks=0, cashBefore=nil, lastShopTarget="",
     failures={}, lastEquipAt=0, equipFailures=0, equipName="", equipStatus=""}
@@ -179,7 +184,10 @@ local function notify(msg)
 end
 local function setState(k, val)
     state[k] = val
-    if callbacks[k] then callbacks[k]() end
+    if not hub.questAutomationChanging and hub.questManagedFlags then
+        hub.questManagedFlags[k] = nil
+    end
+    refreshCallbacks(k)
 end
 local function getChar()
     local c = LocalPlayer.Character
@@ -202,12 +210,25 @@ local function cframeIsland(name)
     end
     return nil
 end
+local function nearestIslandName(root)
+    if not root then return state.selectedIsland or "Beginning Isle" end
+    local bestName,bestDistance=nil,math.huge
+    for _,entry in ipairs(ISLANDS) do
+        local cf=cframeIsland(entry[1])
+        if cf then
+            local distance=(root.Position-cf.Position).Magnitude
+            if distance<bestDistance then bestName,bestDistance=entry[1],distance end
+        end
+    end
+    if bestName and bestDistance<=650 then return bestName end
+    return state.selectedIsland or "Beginning Isle"
+end
 local function teleportTo(cf, name)
     local char, root = getChar()
     if not cf or not char or not root then report("Teleport unavailable: character not ready"); return false end
     local ok = pcall(function() root.CFrame = cf end)
     if ok then
-        if state.autoLevel then
+        if state.autoRoute then
             -- Any external trip (buyer, shop, user teleport) invalidates the old dock.
             hub.routeGate.ready=false
             hub.routeGate.status="Checking location after teleport"
@@ -258,7 +279,17 @@ local function faceSea(island,force)
     if not target then return true end
     if (root.Position-target.Position).Magnitude>185 then return true end
     local now=os.clock()
-    if not force and facingTracker.island==island and now-facingTracker.lastAt<2.5 then return true end
+    if not force and facingTracker.island==island and now-facingTracker.lastAt<2.5 and facingTracker.direction then
+        local current=flatUnit(root.CFrame.LookVector)
+        if current:Dot(facingTracker.direction)>=0.975 then return true end
+        local here=root.Position
+        local corrected=pcall(function() root.CFrame=CFrame.lookAt(here,here+facingTracker.direction) end)
+        if corrected then
+            facingTracker.corrected=facingTracker.corrected+1
+            facingTracker.status="Reapplied sea-facing direction: "..island
+        end
+        return corrected
+    end
     facingTracker.lastAt=now
     facingTracker.island=island
     facingTracker.checks=facingTracker.checks+1
@@ -272,8 +303,10 @@ local function faceSea(island,force)
         if weighted>bestScore then bestScore=weighted; bestDir=dir end
     end
     local verified=waterAhead(root.Position,bestDir,root.Parent)>0
+    facingTracker.direction=bestDir
     if not verified then
         bestDir=base
+        facingTracker.direction=base
         facingTracker.fallbacks=facingTracker.fallbacks+1
         facingTracker.status="Reference heading (water not raycastable)"
     else
@@ -498,7 +531,8 @@ end
 local function rodPower(name)
     if type(name)~="string" or name=="" then return nil end
     local dat=itemModule(name)
-    local n=dat and tonumber(dat.Power or dat.Strength or dat.MaxPower)
+    local n=dat and tonumber(dat.Power or dat.Strength or dat.MaxPower or dat.FishingPower
+        or dat.FishPower or dat.PowerValue or dat.RodPower or dat.PowerLevel)
     if n and n>0 and n<10000 then return n end
     return ROD_POWER[name]
 end
@@ -557,12 +591,29 @@ local ROD_LADDER={
     {name="Thunder Thorn Rod",fallbackPower=67, cost=10000000,island="Coconut Isle"},
     {name="Starlight Rod",fallbackPower=83, cost=60000000,island="Amber Isle"},
 }
+local parseCashPrice
 local function shopPrice(rod,fallback)
     local data=itemModule(rod)
     if data and not data.Ingredient then
-        for _,key in ipairs({"Price","CashPrice","Cost","BuyPrice"}) do
-            local val=tonumber(data[key])
-            if val and val>0 and val<1e12 then return val,true end
+        local shop=type(data.Shop)=="table" and data.Shop or {}
+        local currency=tostring(data.Currency or data.PriceType or data.CostType or shop.Currency or shop.PriceType or shop.CostType or ""):lower():gsub("[^%w]","")
+        local explicitRaw=data.CashPrice or data.BuyPrice or data.CostCash
+            or shop.CashPrice or shop.BuyPrice or shop.CostCash
+        local explicitCash=tonumber(explicitRaw)
+        if not explicitCash and type(explicitRaw)=="string" and parseCashPrice then
+            explicitCash=parseCashPrice(explicitRaw.." Cash")
+        end
+        if explicitCash and explicitCash>0 and explicitCash<1e12 then return explicitCash,true end
+        local genericRaw=data.Price or data.Cost or shop.Price or shop.Cost
+        local generic=tonumber(genericRaw)
+        local cashCurrency=currency:find("cash",1,true) or currency:find("money",1,true) or currency:find("coin",1,true)
+        if not generic and type(genericRaw)=="string" and parseCashPrice then
+            local priceText=genericRaw
+            if cashCurrency and not priceText:lower():find("cash",1,true) then priceText=priceText.." Cash" end
+            generic=parseCashPrice(priceText)
+        end
+        if generic and generic>0 and generic<1e12 and cashCurrency then
+            return generic,true
         end
     end
     return fallback,false
@@ -583,14 +634,96 @@ local function perIslandTarget(entry)
         cost=cost,island=entry.island,verifiedPrice=live,
         mayRequireQuest=entry.mayRequireQuest}
 end
+local function resolveRodIsland(data)
+    if type(data)~="table" then return nil end
+    local shop=type(data.Shop)=="table" and data.Shop or {}
+    local candidates={data.Island,data.IslandName,data.ShopIsland,data.SellerIsland,
+        data.Location,data.ShopLocation,data.ShopName,data.Seller, data.Shop,
+        shop.Island,shop.IslandName,shop.Location,shop.Name,shop.SellerIsland}
+    local aliases={
+        beginning="Beginning Isle", spawn="Beginning Isle", beginningisle="Beginning Isle",
+        bamboo="Bamboo Isle", bambooisle="Bamboo Isle",
+        fallout="Fallout Isle", falloutisle="Fallout Isle",
+        sovereign="Sovereign Isle", sovereignisle="Sovereign Isle",
+        perch="Perch Isle", perchisle="Perch Isle",
+        frost="Frost Isle", frostisle="Frost Isle",
+        coconut="Coconut Isle", coconutisle="Coconut Isle",
+        amber="Amber Isle", amberisle="Amber Isle",
+        battlefield="Battlefield Isle", battlefieldisle="Battlefield Isle",
+        mistpeak="Mistpeak Isle", mistpeakisle="Mistpeak Isle",
+        worldangler="World Angler Isle", worldanglerisle="World Angler Isle",
+        weather="Weather Isle", weatherisle="Weather Isle",
+        mysticreef="Mystic Reef Isle", mysticreefisle="Mystic Reef Isle",
+    }
+    for _,value in pairs(candidates) do
+        if type(value)=="string" then
+            local key=tostring(value):lower():gsub("[^%w]","")
+            if aliases[key] then return aliases[key] end
+            key=key:gsub("island$",""):gsub("isle$","")
+            if aliases[key] then return aliases[key] end
+        end
+    end
+    return nil
+end
+
+local UPDATE_ROD_NAMES={ ["Pure Golden Rod"]=true, ["Kraken Rod"]=true }
+local rodTargetCache={at=0,items={}}
+local function dynamicRodTargets()
+    if os.clock()-rodTargetCache.at<30 then return rodTargetCache.items end
+    local out={}
+    local info=ReplicatedStorage:FindFirstChild("Info")
+    local inventory=info and info:FindFirstChild("Inventory")
+    if not inventory then
+        rodTargetCache={at=os.clock(),items=out}
+        return out
+    end
+    for _,module in ipairs(inventory:GetChildren()) do
+        if module:IsA("ModuleScript") then
+            local data=itemModule(module.Name)
+            local kind=tostring(data and (data.Type or data.Category or data.ItemType) or ""):lower()
+            local normalizedName=tostring(module.Name):lower():gsub("[^%w]","")
+            local nameLooksLikeRod=normalizedName:find("rod",1,true)~=nil
+            local isCosmetic=kind:find("skin",1,true)~=nil or normalizedName:find("skin",1,true)~=nil
+                or (data and data.IsSkin==true) or (data and data.RodSkin==true)
+            local hasPower=data and tonumber(data.Power or data.Strength or data.MaxPower or data.FishingPower
+                or data.FishPower or data.PowerValue or data.RodPower or data.PowerLevel)
+            if data and not data.Ingredient and not isCosmetic
+                and (kind:find("rod",1,true) or (nameLooksLikeRod and (hasPower or UPDATE_ROD_NAMES[module.Name]))) then
+                local power=rodPower(module.Name)
+                local island=resolveRodIsland(data)
+                local price,verified=shopPrice(module.Name,nil)
+                if power and island and price and verified then
+                    table.insert(out,{name=module.Name,power=power,cost=price,island=island,
+                        verifiedPrice=true,source="live item module"})
+                end
+            end
+        end
+    end
+    rodTargetCache={at=os.clock(),items=out}
+    return out
+end
 local function nextRodSuggestion(p)
     p=p or profile()
     local current=rodPower(p.rod) or 0
     local ownedName,ownedPower=bestOwnedRod(p)
     current=math.max(current,ownedPower or 0)
+    local byIsland={}
     for _,tier in ipairs(ROD_LADDER) do
         local item=perIslandTarget(tier)
-        if item.power>current then return item end
+        if item and item.power and item.island then
+            local old=byIsland[item.island]
+            if not old or item.power>old.power then byIsland[item.island]=item end
+        end
+    end
+    for _,item in ipairs(dynamicRodTargets()) do
+        local old=byIsland[item.island]
+        if not old or item.power>old.power or (item.power==old.power and item.cost<old.cost) then
+            byIsland[item.island]=item
+        end
+    end
+    for _,route in ipairs(LEVEL_ROUTE) do
+        local item=byIsland[route.name]
+        if item and item.power>current then return item end
     end
     return nil
 end
@@ -609,6 +742,7 @@ end
 local CODE_LADDER={
     {"SON",0},{"Riku",0},{"HWF",0},
     {"Welcome",20},
+    {"WeeklyUPD2",100},{"Halloween",200},
     {"85KLikes",100},{"80KLikes",100},{"Legendary",100},
     {"BannerShop",100},{"WeeklyUPD1",100},
     {"25KActives",500},{"VermilionBird",500},
@@ -621,10 +755,14 @@ local function redeemEligibleCodes(level)
     for _,entry in ipairs(CODE_LADDER) do
         local code,minLevel=entry[1],entry[2]
         if (tonumber(level) or 0)>=minLevel and not codesAttempted[code] then
-            codesAttempted[code]=true
             lastCodeRequest=now
             local sent=fire("RedeemCode",code)
-            if sent then report("Code attempt: "..code..". Verify in-game reward/eligibility.") end
+            if sent then
+                codesAttempted[code]=true
+                report("Code attempt: "..code..". Verify in-game reward/eligibility.")
+            else
+                report("Code request failed locally; will retry later: "..code)
+            end
             return
         end
     end
@@ -685,12 +823,23 @@ local function getInventory()
     return inv, current, maxCount
 end
 local function flaggedRare(item)
-    local n=item.Name:lower()
-    local rarity=tostring(item:GetAttribute("Rarity") or item:GetAttribute("Tier") or ""):lower()
-    for _,keyword in ipairs({"secret","legendary","mythic","boss","exotic","event","divine"}) do
-        if n:find(keyword,1,true) or rarity:find(keyword,1,true) then return true end
+    if not item then return false end
+    local n=tostring(item.Name or ""):lower()
+    local decoded=fishMetadata and fishMetadata(item)
+    local decodedName=decoded and tostring(decoded.FishName or decoded.Name or "") or ""
+    local meta=decodedName~="" and itemModule(decodedName) or nil
+    local rarity=tostring(item:GetAttribute("Rarity") or item:GetAttribute("Tier")
+        or (decoded and (decoded.Rarity or decoded.Tier or decoded.Quality))
+        or (meta and (meta.Rarity or meta.Tier or meta.Quality)) or ""):lower()
+    for _,keyword in ipairs({"secret","legendary","mythic","boss","exotic","event","divine",
+        "sanguine","primordial","rainbow","sacred","ancient"}) do
+        if n:find(keyword,1,true) or decodedName:lower():find(keyword,1,true)
+            or rarity:find(keyword,1,true) then return true end
     end
     return item:GetAttribute("Secret")==true or item:GetAttribute("Locked")==true
+        or item:GetAttribute("IsRare")==true or item:GetAttribute("EventFish")==true
+        or (decoded and (decoded.Secret==true or decoded.IsRare==true or decoded.Event==true))
+        or (meta and (meta.Secret==true or meta.IsRare==true or meta.Event==true))
 end
 local function isFavorite(item)
     return item.Name:lower():find("| favorite",1,true)~=nil
@@ -702,11 +851,12 @@ local function tryFavorite(item)
     if not state.autoFavorite or isFavorite(item) then return false end
     local ev=event("FavoriteItem")
     if not ev then return false end
-    local entry=favoriteAttempts[item.Name] or {n=0,at=0}
+    if not item or not item.Parent then return false end
+    local entry=favoriteAttempts[item] or {n=0,at=0}
     if entry.n>=3 or os.clock()-entry.at<2.5 then return false end
     entry.n=entry.n+1
     entry.at=os.clock()
-    favoriteAttempts[item.Name]=entry
+    favoriteAttempts[item]=entry
     local ok=fire("FavoriteItem",item.Name)
     if ok then report("Protecting rare catch: "..item.Name.."; waiting for favorite confirmation") end
     return ok
@@ -715,11 +865,11 @@ local function maySell()
     local inv,count,maximum=getInventory()
     -- Craft protection always requires server-replicated inventory data.
     if not inv then
-        if state.protectMaterials and (state.autoFarmMaterials or state.autoCraftRod) then
-            return false,"No inventory data; cannot protect crafting fish"
+        if state.protectMaterials then
+            return false,"No inventory data; cannot verify protected crafting fish"
         end
-        if state.protectRare and not state.fastSell then
-            return false,"No inventory data to check rare fish"
+        if state.protectRare then
+            return false,"No inventory data to verify rare-fish protection"
         end
         return true,"Blind timed sale; inventory not replicated"
     end
@@ -737,7 +887,7 @@ local function maySell()
     if state.sellNearFull and (not maximum or maximum<=0 or count/maximum<0.88) then
         return false,"Bag below 88% or limit unknown"
     end
-    if state.protectRare and not state.fastSell then
+    if state.protectRare then
         for _,item in ipairs(inv:GetChildren()) do
             if flaggedRare(item) and not isFavorite(item) then
                 tryFavorite(item)
@@ -891,7 +1041,7 @@ local function startBoss(name)
     return started
 end
 
--- v2.4 guarded UI-driven rod purchasing. We do not guess/forge an
+-- Guarded UI-driven rod purchasing. We do not guess/forge an
 -- undocumented purchase RemoteEvent or invoke a random remote with Cash.
 -- The in-game shop must expose an exact matching rod name and Buy button.
 local function isShopping()
@@ -922,6 +1072,19 @@ local function buttonActionText(btn)
     end
     return table.concat(words," "):lower()
 end
+local function unverifiedUpdateRod(name)
+    if UPDATE_ROD_NAMES[name] and not rodPower(name) then return name end
+    return nil
+end
+local function unverifiedOwnedUpdateRod(p)
+    p=p or profile()
+    local folder=p.data and p.data:FindFirstChild("FishingRodInventory")
+    if not folder then return nil end
+    for name in pairs(UPDATE_ROD_NAMES) do
+        if folder:FindFirstChild(name) and unverifiedUpdateRod(name) then return name end
+    end
+    return nil
+end
 local function actionButtonForRod(name,action)
     local gui=PlayerGui:FindFirstChild("MainGui")
     if not gui then return nil end
@@ -945,7 +1108,7 @@ local function actionButtonForRod(name,action)
             local unrelated=0
             for _,node in ipairs(ancestor:GetDescendants()) do
                 if node:IsA("TextLabel") and node~=match then
-                    if ROD_POWER[node.Text] and cleanName(node.Text)~=wanted then
+                    if (ROD_POWER[node.Text] or UPDATE_ROD_NAMES[node.Text]) and cleanName(node.Text)~=wanted then
                         unrelated=unrelated+1
                         break
                     end
@@ -967,6 +1130,72 @@ local function actionButtonForRod(name,action)
     end
     return best
 end
+parseCashPrice = function(text)
+    local lower=tostring(text or ""):lower():gsub(",","")
+    if not (lower:find("cash",1,true) or lower:find("price",1,true) or lower:find("$",1,true)) then return nil end
+    local patterns={
+        "price%s*[:=%-]?%s*%$?%s*(%d+%.?%d*)%s*([kmb]?)",
+        "%$%s*(%d+%.?%d*)%s*([kmb]?)",
+        "cash%s*[:=%-]?%s*(%d+%.?%d*)%s*([kmb]?)",
+        "(%d+%.?%d*)%s*([kmb]?)%s*cash",
+    }
+    local amount,suffix
+    for _,pattern in ipairs(patterns) do
+        amount,suffix=lower:match(pattern)
+        if amount then break end
+    end
+    local value=tonumber(amount)
+    if not value then return nil end
+    suffix=suffix or ""
+    if suffix=="k" then value=value*1000
+    elseif suffix=="m" then value=value*1000000
+    elseif suffix=="b" then value=value*1000000000 end
+    if value<=0 or value>1e12 then return nil end
+    return math.floor(value)
+end
+
+local function liveCashPriceNearButton(btn,rodName)
+    if not btn then return nil end
+    local wanted=cleanName(rodName)
+    local node=btn.Parent
+    for _=1,4 do
+        if not node or node==PlayerGui then break end
+        local texts={}
+        if node:IsA("TextLabel") or node:IsA("TextButton") then table.insert(texts,node.Text) end
+        for _,obj in ipairs(node:GetDescendants()) do
+            if obj:IsA("TextLabel") or obj:IsA("TextButton") then table.insert(texts,obj.Text) end
+        end
+        local combined=cleanName(table.concat(texts," "))
+        if combined:find(wanted,1,true) then
+            local otherRod=false
+            for name in pairs(ROD_POWER) do
+                if cleanName(name)~=wanted and combined:find(cleanName(name),1,true) then
+                    otherRod=true;break
+                end
+            end
+            for name in pairs(UPDATE_ROD_NAMES) do
+                if cleanName(name)~=wanted and combined:find(cleanName(name),1,true) then
+                    otherRod=true;break
+                end
+            end
+            if not otherRod then
+                for _,candidate in ipairs(dynamicRodTargets()) do
+                    if cleanName(candidate.name)~=wanted and combined:find(cleanName(candidate.name),1,true) then
+                        otherRod=true;break
+                    end
+                end
+            end
+            if not otherRod then
+                for _,text in ipairs(texts) do
+                    local price=parseCashPrice(text)
+                    if price then return price end
+                end
+            end
+        end
+        node=node.Parent
+    end
+    return nil
+end
 local function clickGameButton(btn,secondMethod)
     if not btn or not guiVisible(btn) then return false end
     if not secondMethod then
@@ -978,9 +1207,7 @@ local function clickGameButton(btn,secondMethod)
         local vim=game:GetService("VirtualInputManager")
         vim:SendMouseButtonEvent(center.X,center.Y,0,true,game,0)
         task.delay(0.06,function()
-            if hub.running then
-                pcall(function() vim:SendMouseButtonEvent(center.X,center.Y,0,false,game,0) end)
-            end
+            pcall(function() vim:SendMouseButtonEvent(center.X,center.Y,0,false,game,0) end)
         end)
     end)
     return ok
@@ -1000,8 +1227,9 @@ local function findInventoryNavigation()
     end
     return nil
 end
-local function findRodVendor()
-    local from=cframeIsland(rodShop.target and rodShop.target.island or "Beginning Isle")
+local function findRodVendor(anywhere)
+    local from=not anywhere and cframeIsland(rodShop.target and rodShop.target.island or "Beginning Isle") or nil
+    local _,root=getChar()
     local best,bestDist=nil,math.huge
     for _,folderName in ipairs({"NPC","NPCs","Merchant","NPCDialogue"}) do
         local folder=workspace:FindFirstChild(folderName)
@@ -1011,8 +1239,9 @@ local function findRodVendor()
                 if n=="biaodi" or n=="rodseller" or n=="buyfishingrod" then
                     local p=getPart(obj)
                     if p then
-                        local dist=from and (p.Position-from.Position).Magnitude or 0
-                        if dist<bestDist and dist<450 then best,bestDist=obj,dist end
+                        local dist=from and (p.Position-from.Position).Magnitude
+                            or (root and (p.Position-root.Position).Magnitude or 0)
+                        if dist<bestDist and (anywhere or dist<450) then best,bestDist=obj,dist end
                     end
                 end
             end
@@ -1039,6 +1268,8 @@ function hub.shopNeedsPause(p)
         return false,nil
     end
     p=p or profile()
+    local unknown=unverifiedOwnedUpdateRod(p)
+    if unknown then return false,"New rod stats unavailable: "..unknown end
     local owned,power=bestOwnedRod(p)
     if power and power>(rodPower(p.rod) or 0) then
         if (rodShop.equipFailures or 0)<3 then
@@ -1063,7 +1294,7 @@ local function findFishBuyer()
             for _,obj in ipairs(folder:GetDescendants()) do
                 local n=cleanName(obj.Name)
                 -- Nana is the actual fish buyer; Biao Ge sets spawn and is NOT a buyer.
-                if n=="nana" or n=="sellfish" or n=="fishbuyer" then
+                if n=="nana" or n:find("nana",1,true) or n=="sellfish" or n:find("fishbuyer",1,true) then
                     local part=getPart(obj)
                     if part then
                         local dist=(part.Position-root.Position).Magnitude
@@ -1175,6 +1406,11 @@ local function shopTick()
     if os.clock()<(hub.manualTravelUntil or 0) then return end
     local now=os.clock()
     local p=profile()
+    local unknown=unverifiedOwnedUpdateRod(p)
+    if unknown then
+        rodShop.status="Auto-buy paused: live Power for "..unknown.." is not exposed; scan game data first"
+        return
+    end
     if rodShop.phase=="cooldown" then
         if now<rodShop.untilAt then return end
         rodShop.phase="idle"
@@ -1258,12 +1494,20 @@ local function shopTick()
         return
     end
     if rodShop.phase=="open" then
-        if not p.cash or p.cash<target.cost then
-            finishRodShop("Insufficient Cash for "..target.name.."; no purchase",60)
-            return
-        end
         local buy=actionButtonForRod(target.name,"buy")
         if buy then
+            local visiblePrice=liveCashPriceNearButton(buy,target.name)
+            if visiblePrice then
+                target.cost=visiblePrice
+                target.verifiedPrice=true
+            elseif not target.verifiedPrice then
+                finishRodShop("Unverified shop price for "..target.name.."; no purchase",180)
+                return
+            end
+            if not p.cash or p.cash<target.cost then
+                finishRodShop("Insufficient Cash for verified "..target.name.." price; no purchase",60)
+                return
+            end
             -- One button interaction, then WAIT for server-owned data.
             rodShop.clicks=rodShop.clicks+1
             local ok=clickGameButton(buy,rodShop.clicks>=2)
@@ -1287,12 +1531,17 @@ local function shopTick()
         end
         if now-rodShop.lastVisit>3 then
             local prompt=vendor:FindFirstChildWhichIsA("ProximityPrompt",true)
-            if prompt and type(fireproximityprompt)=="function" then
+            local detector=vendor:FindFirstChildWhichIsA("ClickDetector",true)
+            if prompt and prompt.Enabled and type(fireproximityprompt)=="function" then
                 rodShop.lastVisit=now
                 pcall(function() fireproximityprompt(prompt) end)
                 rodShop.status="Interacting with "..target.island.." Rod Seller"
+            elseif detector and type(fireclickdetector)=="function" then
+                rodShop.lastVisit=now
+                pcall(function() fireclickdetector(detector) end)
+                rodShop.status="Clicking "..target.island.." Rod Seller"
             else
-                rodShop.status="Open Rod Seller manually: shop prompt not available"
+                rodShop.status="Open Rod Seller manually: no supported prompt / detector"
             end
         end
         return
@@ -1318,14 +1567,14 @@ local questTracker = {status="Idle", sage="waiting", sageRoute=nil, nextAt=0,
     lastInteract=-math.huge, lastTicket=-math.huge, lastUI=-math.huge, ticketStatus="Idle", side="Idle",
     lastDaily=0, pausedUntil=0, lastSageVisit=0, lastProgress="", lastZeng=-math.huge, zengStatus="OFF", routeLockUntil=0}
 local craftTracker = {status="Idle", route=nil, fish=nil, lastAt=-math.huge,
-    attempts=0, lastBefore=nil, pendingAt=0, lastBaitAt=-math.huge,
-    lastEquipBaitAt=-math.huge, lastSuccessful=nil, fishCount=0}
-local merchantTracker = {Maoshan=nil,Taoist=nil, lastSeen={}, lastScan=-math.huge,
+    attempts=0, lastBefore=nil, pendingAt=0, manualReview=false, lastBaitAt=-math.huge,
+    baitPending=nil, baitManualReview={}, lastEquipBaitAt=-math.huge, lastSuccessful=nil, fishCount=0}
+local merchantTracker = {Maoshan=nil,Taoist=nil,Halloween=nil,Samba=nil, lastSeen={}, lastScan=-math.huge,
     alerts=0, seenThisSession={}}
 local QUESTRUN_CATALOG = {
     -- autoKey points only to handlers that already exist in this build.
     {id="SageDiamond",npc="Sage Yijiu",island="Battlefield Isle",reward="Diamond Rod",rewardType="Rod",type="Sage 1",objective="Catch 5 fish of at least 1,500,000 kg each",autoKey="autoSageAfterAmber",automation="Auto: accept / farm / turn-in attempt"},
-    {id="SagePhoenix",npc="Sage Yijiu",island="Battlefield Isle",reward="Phoenix Annihilation Art",rewardType="Skill",type="Sage 2",objective="Own Phoenix Strive Art v2; catch 250 fish; catch Scarlet Fish and Elder Scarlet Fish at 1.5M kg in Bamboo Thunderstorm",automation="Track only: later Sage stage not implemented"},
+    {id="SagePhoenix",npc="Sage Yijiu",island="Battlefield Isle",reward="Phoenix Strive Art v2",rewardType="Skill",type="Sage 2",objective="Own Phoenix Strive Art v2; catch 250 fish; catch Scarlet Fish and Elder Scarlet Fish at 1.5M kg in Bamboo Thunderstorm",automation="Track only: later Sage stage not implemented"},
     {id="SageFivefold",npc="Sage Yijiu",island="Battlefield Isle",reward="Fivefold Ascension",rewardType="Skill",type="Sage 3",objective="Catch a 2M kg Draconic Koi; own Sever The Gate v3; catch 10 fish of 1M kg",automation="Track only: later Sage stage not implemented"},
     {id="SageTenfold",npc="Sage Yijiu",island="Battlefield Isle",reward="Tenfold Convergence",rewardType="Skill",type="Sage 4",objective="Catch a 6M kg Rainbow Dragon Fish; use Fivefold Ascension 50 times",automation="Track only: later Sage stage not implemented"},
     {id="SageOneHook",npc="Sage Yijiu",island="Battlefield Isle",reward="One Hook Dominance",rewardType="Skill",type="Sage 5",objective="Catch a 5M kg Frost Kingfish and 6.5M kg Frost Queen Fish; use Tenfold Convergence 100 times",automation="Track only: later Sage stage not implemented"},
@@ -1339,12 +1588,16 @@ local QUESTRUN_CATALOG = {
     {id="BacMinh",npc="Bac Minh",island="Coconut Isle",reward="Bac Minh Orb",rewardType="Orb",type="NPC quest",objective="Quest objectives are server-defined; inspect live quest module",automation="Track only: live dialogue not mapped"},
     {id="TicketQuest",npc="Ticket Quest Giver",island="Beginning Isle",reward="Easy / Hard Tickets",rewardType="Ticket",type="Daily",objective="Complete the selected daily ticket quest; daily limit applies",autoKey="autoTicketQuests",automation="Auto: accept / progress-check / turn-in attempt"},
     {id="ZengRepeatable",npc="Zeng Tianguo",island="Beginning Isle",reward="Variable server-defined reward",rewardType="Other",type="Repeatable",objective="Objectives and reward are server-defined; turn in only when replicated goals are complete",autoKey="autoZengQuest",automation="Auto: accept / progress-check / turn-in attempt"},
-    {id="DailyClaims",npc="Daily Quest System",island="Any",reward="Server-defined daily reward",rewardType="Daily",type="Daily claim",objective="Claims only already-completed daily objectives; does not complete them",autoKey="autoDailyQuest",automation="Auto: claim completed rewards only"},
+    {id="DailyClaims",npc="Daily Quest System",island="Any",reward="Completed daily quest rewards",rewardType="Daily",type="Daily claim",objective="Claims only already-completed daily objectives; does not complete them",autoKey="autoDailyQuest",automation="Auto: claim completed rewards only"},
+    {id="DailyLoginReward",npc="Daily Reward System",island="Any",reward="Daily login reward",rewardType="Daily",type="Daily login",objective="Daily login cycle and claim event are not verified in the current public source set",automation="INFO only: live claim event / eligibility not verified"},
     {id="ChuXinDivine",npc="Chu Xin",island="Varies",reward="Divine Rod",rewardType="Rod",type="Main quest",objective="Public rod index lists this as a Chu Xin quest reward; live steps not verified",automation="Track only: live dialogue not mapped"},
     {id="YaxuoUnknown",npc="Yaxuo",island="Varies",reward="Unknown Rod",rewardType="Rod",type="Main quest",objective="Public rod index lists an Unknown Rod; exact reward name and live steps need in-game confirmation",automation="Track only: reward details uncertain"},
     {id="SambaQuest",npc="Samba / Samba Quest NPC",island="New update area",reward="Nautilus Dance; Samba Charge; Centerpiece Samba; Wavebreaker; Samba character unlock (requires Nautilus Dance)",rewardType="Skill",type="Weekly update",objective="Samba questline from the 2026-10-30 update; live objectives and NPC dialogue not yet verified",automation="New: track only until live quest data is mapped",source="User-provided Weekly UPD log"},
     {id="HalloweenEvent",npc="Halloween Event NPC",island="Event location",reward="Cursed Lantern Rod skin",rewardType="Seasonal",type="Seasonal event",objective="Halloween NPC event from the 2026-10-30 update; live objectives and expiry not yet verified",automation="New: track only until live quest data is mapped",source="User-provided Weekly UPD log"},
-    {id="PureGoldenRodInfo",npc="Rod Seller / unknown",island="Unknown",reward="Pure Golden Rod",rewardType="Rod",type="New rod info",objective="New rod announced in the 2026-10-30 update; not confirmed as a quest reward or its acquisition route",automation="Info only: not listed as a confirmed quest",source="User-provided Weekly UPD log"},
+    {id="PureGoldenRodInfo",npc="Rod Seller / unknown",island="Unknown",reward="Pure Golden Rod",rewardType="Rod",type="New rod info",objective="New rod announced in the 2026-10-30 update; price, Power, island and acquisition route are read from live game data only",automation="Info only until live stats and shop location are exposed",source="User-provided Weekly UPD log"},
+    {id="SambaOrbInfo",npc="Samba / unknown",island="Unknown",reward="Samba Orb",rewardType="Orb",type="New orb info",objective="New orb announced in the 2026-10-30 update; quest source and acquisition steps are not verified",automation="Info only until live reward handler is mapped",source="User-provided Weekly UPD log"},
+    {id="KrakenRodRevamp",npc="Rod Seller / unknown",island="Unknown",reward="Kraken Rod (revamped)",rewardType="Rod",type="Rod update",objective="Kraken Rod was revamped in the 2026-10-30 update; current Power, price and acquisition path must come from live game data",automation="Info only until live stats and shop data are exposed",source="User-provided Weekly UPD log"},
+    {id="SaveComboSystem",npc="Player system",island="Any",reward="Saved skill combo presets",rewardType="Other",type="System update",objective="Save Combo feature announced in the 2026-10-30 update; UI / data API not mapped",automation="Info only: no guessed combo remotes",source="User-provided Weekly UPD log"},
 }
 local CRAFT_PLAN = {
     ["Heavenpiercer Rod"] = {
@@ -1369,9 +1622,8 @@ local CRAFT_PLAN = {
 local function fold(s)
     return tostring(s or ""):lower():gsub("[^%w]", "")
 end
-local fishDecoder = nil
-local function normalizeFish(item)
-    if not item then return "" end
+local function readFishMetadata(item)
+    if not item then return nil end
     local name=type(item)=="string" and item or item.Name
     name=tostring(name or "")
     if not fishDecoder then
@@ -1386,11 +1638,17 @@ local function normalizeFish(item)
     end
     if fishDecoder then
         local ok,decoded=pcall(fishDecoder,name)
-        if ok and type(decoded)=="table" and type(decoded.FishName)=="string" then
-            return fold(decoded.FishName)
-        end
+        if ok and type(decoded)=="table" then return decoded end
     end
-    local before=name:match("^([^,|]+)") or name
+    return nil
+end
+fishMetadata=readFishMetadata
+local function normalizeFish(item)
+    if not item then return "" end
+    local decoded=fishMetadata and fishMetadata(item)
+    if decoded and type(decoded.FishName)=="string" then return fold(decoded.FishName) end
+    local name=type(item)=="string" and item or item.Name
+    local before=tostring(name or ""):match("^([^,|]+)") or tostring(name or "")
     return fold(before)
 end
 local function ownedFishCount(fishName)
@@ -1406,15 +1664,39 @@ local function recipeForTarget()
     local n=state.craftTarget
     return CRAFT_PLAN[n],n
 end
+local ingredientCache={at=0,names={}}
+local function rebuildIngredientCache()
+    local now=os.clock()
+    if now-ingredientCache.at<60 then return end
+    local names={}
+    for _,recipe in pairs(CRAFT_PLAN) do
+        for _,entry in ipairs(recipe.fish) do names[fold(entry.name)]=true end
+    end
+    local info=ReplicatedStorage:FindFirstChild("Info")
+    local inventory=info and info:FindFirstChild("Inventory")
+    if inventory then
+        for _,module in ipairs(inventory:GetChildren()) do
+            if module:IsA("ModuleScript") then
+                local data=itemModule(module.Name)
+                local kind=tostring(data and (data.Type or data.Category) or ""):lower()
+                if data and type(data.Ingredient)=="table"
+                    and (kind:find("rod",1,true) or kind:find("bait",1,true)) then
+                    for key,value in pairs(data.Ingredient) do
+                        local material=type(key)=="string" and key
+                            or (type(value)=="table" and (value.Name or value.Item or value.FishName))
+                        if type(material)=="string" and material~="" then names[fold(material)]=true end
+                    end
+                end
+            end
+        end
+    end
+    ingredientCache={at=now,names=names}
+end
 isCraftIngredient = function(item)
     if not state.protectMaterials then return false end
-    local recipe=CRAFT_PLAN[state.craftTarget]
-    if not recipe then return false end
+    rebuildIngredientCache()
     local name=normalizeFish(item)
-    for _,entry in ipairs(recipe.fish) do
-        if name==fold(entry.name) then return true end
-    end
-    return false
+    return ingredientCache.names[name]==true
 end
 local function currentWeather()
     return tostring(workspace:GetAttribute("Weather") or "Unknown")
@@ -1427,33 +1709,52 @@ local function matchingWeather(got,needed)
     if b=="blazingsun" then return a:find("blazing",1,true)~=nil end
     return a==b
 end
+local ownedBaitCount, parseRequirements, liveCraftModule
 local function knownFishForWeather()
     local recipe=CRAFT_PLAN[state.craftTarget]
-    if not recipe then return nil,nil,nil end
+    if not recipe then return nil,nil,"No recognized craft recipe" end
+    local actualName,data=liveCraftModule(state.craftTarget)
+    local req=actualName and parseRequirements(data) or nil
+    if not req then return nil,nil,"Live craft recipe not replicated; material farming paused" end
+    local expected={}
+    for _,entry in ipairs(recipe.fish) do expected[fold(entry.name)]=true end
+    for material in pairs(req) do
+        if not expected[fold(material)] then
+            return nil,nil,"Live recipe has an unrecognized ingredient: "..tostring(material)
+        end
+    end
     local weather=currentWeather()
     local nextUnowned=nil
     local baitMissing=nil
     for _,entry in ipairs(recipe.fish) do
+        local required=1
+        for material,qty in pairs(req) do
+            if fold(material)==fold(entry.name) then required=qty;break end
+        end
         local owned=ownedFishCount(entry.name)
         if owned==nil then return nil,nil,"Fish inventory not replicated" end
-        if owned<1 then
-            nextUnowned=nextUnowned or entry
-            if entry.bait then baitMissing=baitMissing or entry end
-            if entry.island and matchingWeather(weather,entry.weather) then
-                return entry.island,entry,"Weather match "..weather
+        if owned<required then
+            local missing={name=entry.name,island=entry.island,weather=entry.weather,bait=entry.bait,required=required,owned=owned}
+            nextUnowned=nextUnowned or missing
+            if entry.bait and (ownedBaitCount(entry.bait) or 0)<1 then
+                baitMissing=baitMissing or missing
+            elseif entry.island and matchingWeather(weather,entry.weather) then
+                return entry.island,missing,"Weather match "..weather.."; need "..(required-owned).." more "..entry.name
             end
         end
     end
-    if not nextUnowned then return nil,nil,"All four recipe fish present" end
+    if not nextUnowned then return nil,nil,"All live recipe materials present" end
     if baitMissing then return nil,baitMissing,"Needs "..baitMissing.bait.." (summoned fish)" end
-    return nil,nextUnowned,("Waiting for "..nextUnowned.weather.." on "..nextUnowned.island)
+    return nil,nextUnowned,("Waiting for "..tostring(nextUnowned.weather or "required spawn").." on "..tostring(nextUnowned.island or "current island"))
 end
-local function ownedBaitCount(name)
+ownedBaitCount = function(name)
     local pd=playerData()
     if not pd then return nil end
+    local inventoryFound=false
     for _,folderName in ipairs({"Bait","BaitInventory","Inventory"}) do
         local folder=pd:FindFirstChild(folderName)
         if folder then
+            inventoryFound=true
             for _,obj in ipairs(folder:GetChildren()) do
                 if fold(obj.Name)==fold(name) or fold(obj.Name:match("^([^,|]+)") or obj.Name)==fold(name) then
                     if obj:IsA("ValueBase") then return tonumber(obj.Value) or 0 end
@@ -1462,7 +1763,7 @@ local function ownedBaitCount(name)
             end
         end
     end
-    return 0
+    return inventoryFound and 0 or nil
 end
 local function equipSpecialBait(name)
     if os.clock()-craftTracker.lastEquipBaitAt<15 then return false end
@@ -1477,7 +1778,7 @@ local function equipSpecialBait(name)
     if ok then craftTracker.status="Requested bait equip: "..name.." (check hotbar slot 2)" end
     return ok
 end
-local function parseRequirements(data)
+parseRequirements = function(data)
     if type(data)~="table" then return nil end
     local ing=data.Ingredient
     if type(ing)~="table" then return nil end
@@ -1487,6 +1788,9 @@ local function parseRequirements(data)
         local name,qty=nil,nil
         if type(key)=="string" and tonumber(val) then
             name,qty=key,tonumber(val)
+        elseif type(key)=="string" and type(val)=="table" then
+            name=val.Name or val.Item or val.Fish or key
+            qty=tonumber(val.Count or val.Amount or val.Quantity or val[2])
         elseif type(val)=="table" then
             name=val.Name or val.Item or val.Fish or val[1]
             qty=tonumber(val.Count or val.Amount or val.Quantity or val[2])
@@ -1497,21 +1801,73 @@ local function parseRequirements(data)
     end
     return found>0 and requirements or nil
 end
-local function liveCraftModule(target)
+liveCraftModule = function(target)
     local info=ReplicatedStorage:FindFirstChild("Info")
     local inv=info and info:FindFirstChild("Inventory")
     if not inv then return nil end
     for _,m in ipairs(inv:GetChildren()) do
         if m:IsA("ModuleScript") and fold(m.Name)==fold(target) then
             local data=itemModule(m.Name)
-            if data and data.Ingredient and (not data.Type or fold(data.Type):find("rod",1,true)) then return m.Name,data end
+            local kind=fold(data and (data.Type or data.Category or data.ItemType) or "")
+            if data and data.Ingredient and (kind=="" or kind:find("rod",1,true) or fold(m.Name):find("rod",1,true)) then
+                return m.Name,data
+            end
         end
     end
     return nil
 end
+local function scanLiveRodData()
+    local info=ReplicatedStorage:FindFirstChild("Info")
+    local inventory=info and info:FindFirstChild("Inventory")
+    if not inventory then return {},"Info.Inventory not replicated" end
+    local rows={}
+    for _,module in ipairs(inventory:GetChildren()) do
+        if module:IsA("ModuleScript") then
+            local data=itemModule(module.Name)
+            local kind=tostring(data and (data.Type or data.Category or data.ItemType) or ""):lower()
+            local normalizedName=fold(module.Name)
+            local nameLooksLikeRod=normalizedName:find("rod",1,true)~=nil
+            local power=data and tonumber(data.Power or data.Strength or data.MaxPower or data.FishingPower
+                or data.FishPower or data.PowerValue or data.RodPower or data.PowerLevel)
+            local isCosmetic=kind:find("skin",1,true)~=nil or normalizedName:find("skin",1,true)~=nil
+                or (data and data.IsSkin==true) or (data and data.RodSkin==true)
+            if data and not isCosmetic
+                and (kind:find("rod",1,true) or (nameLooksLikeRod and (power or UPDATE_ROD_NAMES[module.Name]))) then
+                local price,verified=shopPrice(module.Name,nil)
+                local req=parseRequirements(data)
+                local ingredients={}
+                if req then
+                    for material,qty in pairs(req) do
+                        ingredients[#ingredients+1]=material.." x"..tostring(qty)
+                    end
+                    table.sort(ingredients)
+                end
+                table.insert(rows,{
+                    name=module.Name,power=rodPower(module.Name),price=price,
+                    verifiedPrice=verified,island=resolveRodIsland(data),
+                    craftable=req~=nil,ingredients=table.concat(ingredients,", "),
+                    type=tostring(data.Type or data.Category or data.ItemType or "unknown"),
+                })
+            end
+        end
+    end
+    table.sort(rows,function(a,b) return a.name:lower()<b.name:lower() end)
+    return rows,nil
+end
 local function maybeCraftBait(name)
-    if not state.autoCraftBait or os.clock()-craftTracker.lastBaitAt<90 then return false end
-    if (ownedBaitCount(name) or 0)>0 then return false end
+    if not state.autoCraftBait or not state.protectMaterials then return false end
+    if craftTracker.baitPending then
+        craftTracker.status="Waiting to verify bait craft: "..craftTracker.baitPending.name
+        return false
+    end
+    if craftTracker.baitManualReview[name] then
+        craftTracker.status="Bait craft paused for manual review: "..name
+        return false
+    end
+    if os.clock()-craftTracker.lastBaitAt<90 then return false end
+    local baitOwned=ownedBaitCount(name)
+    if baitOwned==nil then craftTracker.status="Bait inventory not replicated; automatic craft blocked";return false end
+    if baitOwned>0 then return false end
     local inf=ReplicatedStorage:FindFirstChild("Info")
     local fld=inf and inf:FindFirstChild("Bait")
     local mod=fld and fld:FindFirstChild(name)
@@ -1526,22 +1882,66 @@ local function maybeCraftBait(name)
         return false
     end
     for material,qty in pairs(req) do
-        local count=ownedFishCount(material) or ownedBaitCount(material)
-        if not count or count<qty then
+        local fishCount=ownedFishCount(material) or 0
+        local baitCount=ownedBaitCount(material) or 0
+        local count=math.max(fishCount,baitCount)
+        if count<qty then
             craftTracker.status="Bait material missing: "..material.." x"..qty
             return false
         end
     end
-    craftTracker.lastBaitAt=os.clock()
-    if fire("CraftBait",name,1) then
-        craftTracker.status="Craft bait requested: "..name.." (verify inventory)"
+    local currency=fold(data.Currency or data.CostType or data.PriceType or "")
+    local gemCost=tonumber(data.Gems or data.GemPrice or data.Crystals or data.CrystalPrice)
+    local cashCost=tonumber(data.CashPrice or data.CashCost)
+    local genericCost=tonumber(data.Price or data.Cost)
+    if gemCost and gemCost>0 then
+        local balance=candidateValue(playerData(),{"Gems","Gem","Crystals","Crystal"})
+        if not balance or balance<gemCost then craftTracker.status="Not enough verified Gems for "..name;return false end
+    elseif cashCost and cashCost>0 then
+        local balance=candidateValue(playerData(),{"Cash","Money","Coins"})
+        if not balance or balance<cashCost then craftTracker.status="Not enough verified Cash for "..name;return false end
+    elseif genericCost and genericCost>0 then
+        if currency:find("gem",1,true) or currency:find("crystal",1,true) then
+            local balance=candidateValue(playerData(),{"Gems","Gem","Crystals","Crystal"})
+            if not balance or balance<genericCost then craftTracker.status="Not enough verified Gems for "..name;return false end
+        elseif currency:find("cash",1,true) or currency:find("money",1,true) or currency:find("coin",1,true) then
+            local balance=candidateValue(playerData(),{"Cash","Money","Coins"})
+            if not balance or balance<genericCost then craftTracker.status="Not enough verified Cash for "..name;return false end
+        else
+            craftTracker.status="Bait currency is ambiguous; no automatic spend for "..name
+            return false
+        end
+    elseif currency:find("shard",1,true) or currency:find("token",1,true) then
+        craftTracker.status="Bait uses an untracked currency; automatic craft blocked"
+        return false
+    elseif currency:find("gem",1,true) or currency:find("crystal",1,true)
+        or currency:find("cash",1,true) or currency:find("money",1,true) or currency:find("coin",1,true) then
+        craftTracker.status="Bait currency is named but its price is missing; automatic craft blocked"
+        return false
+    end
+    local before=ownedBaitCount(name) or 0
+    local sent=fire("CraftBait",name,1)
+    if sent then
+        craftTracker.lastBaitAt=os.clock()
+        craftTracker.baitPending={name=name,before=before,at=os.clock()}
+        craftTracker.status="Craft bait requested: "..name.."; waiting for inventory confirmation"
         return true
     end
-    craftTracker.status="CraftBait remote not available"
+    craftTracker.status="CraftBait remote not available or request errored"
     return false
 end
+
 local function beginCraftAttempt()
-    if not state.autoCraftRod or craftTracker.pendingAt>0 or os.clock()-craftTracker.lastAt<135 then return end
+    if not state.autoCraftRod or craftTracker.pendingAt>0 or craftTracker.baitPending
+        or os.clock()-craftTracker.lastAt<135 then return end
+    if craftTracker.manualReview then
+        craftTracker.status="Paused after an unconfirmed attempt; inspect result, then unlock one retry manually"
+        return
+    end
+    if not state.protectMaterials then
+        craftTracker.status="Craft blocked: Protect all craft ingredients must remain ON"
+        return
+    end
     if sellTracker.pending or isShopping() or buyerTripActive() then return end
     local recipe,target=recipeForTarget()
     if not recipe then return end
@@ -1562,18 +1962,21 @@ local function beginCraftAttempt()
     end
     local expected={}
     for _,fish in ipairs(recipe.fish) do expected[fold(fish.name)]=true end
-    local confirmed=0
+    local confirmed,requirementCount=0,0
     for material,qty in pairs(req) do
-        if expected[fold(material)] then
-            confirmed=confirmed+1
-            if (ownedFishCount(material) or 0)<qty then
-                craftTracker.status="Missing "..material.." x"..qty
-                return
-            end
+        requirementCount=requirementCount+1
+        if not expected[fold(material)] then
+            craftTracker.status="Unexpected live ingredient "..tostring(material).."; no spend"
+            return
+        end
+        confirmed=confirmed+1
+        if (ownedFishCount(material) or 0)<qty then
+            craftTracker.status="Missing "..material.." x"..qty
+            return
         end
     end
-    if confirmed<4 then
-        craftTracker.status="Live recipe does not confirm all 4 fish; no spend"
+    if confirmed~=#recipe.fish or requirementCount~=#recipe.fish then
+        craftTracker.status="Live recipe does not exactly match the known fish list; no spend"
         return
     end
     local dataRoot=playerData()
@@ -1582,7 +1985,15 @@ local function beginCraftAttempt()
         craftTracker.status="Gem balance not replicated; craft blocked"
         return
     end
-    local price=tonumber(data.Crystals or data.CrystalPrice or data.Gems or data.GemPrice or data.CraftPrice) or recipe.cost
+    local price=tonumber(data.Gems or data.GemPrice or data.Crystals or data.CrystalPrice)
+    local currency=tostring(data.Currency or data.CostType or data.PriceType or ""):lower()
+    if not price and (currency:find("gem",1,true) or currency:find("crystal",1,true)) then
+        price=tonumber(data.Price or data.Cost or data.CraftPrice)
+    end
+    if not price or price<=0 then
+        craftTracker.status="Live Gem price not exposed; automatic craft blocked (no guessed spend)"
+        return
+    end
     if gems<price then
         craftTracker.status="Saving Gems for craft: "..gems.." / "..price
         return
@@ -1601,12 +2012,62 @@ local function beginCraftAttempt()
     end
 end
 local function craftTick()
+    if craftTracker.baitPending then
+        local pending=craftTracker.baitPending
+        local current=ownedBaitCount(pending.name)
+        if current and current>pending.before then
+            craftTracker.baitPending=nil
+            craftTracker.baitManualReview[pending.name]=nil
+            craftTracker.status="BAIT CRAFT CONFIRMED: "..pending.name
+            notify("Bait craft confirmed: "..pending.name)
+            return
+        elseif os.clock()-pending.at>=12 then
+            craftTracker.baitPending=nil
+            craftTracker.baitManualReview[pending.name]=true
+            craftTracker.status="Bait result unconfirmed; paused to prevent repeated material spending: "..pending.name
+            notify("Bait craft unconfirmed. Review inventory before unlocking another attempt.")
+            return
+        else
+            craftTracker.status="Waiting for bait inventory confirmation: "..pending.name
+            return
+        end
+    end
+    if craftTracker.pendingAt>0 then
+        local target=craftTracker.lastBefore and craftTracker.lastBefore.rod or state.craftTarget
+        if ownedRod(target) then
+            craftTracker.pendingAt=0
+            craftTracker.manualReview=false
+            craftTracker.lastSuccessful=target
+            craftTracker.status="CRAFT SUCCESS verified: "..target
+            notify("Crafted "..target.."! Server inventory confirms ownership.")
+            return
+        end
+        if os.clock()-craftTracker.pendingAt<12 then
+            craftTracker.status="Waiting for rod inventory confirmation: "..target
+            return
+        end
+        local changed=false
+        if craftTracker.lastBefore then
+            local old=craftTracker.lastBefore
+            local newGems=candidateValue(playerData(),{"Crystals","Crystal","Gems","Gem"})
+            if newGems and old.gem and newGems<old.gem then changed=true end
+            for fish,qty in pairs(old.fish or {}) do
+                local current=ownedFishCount(fish)
+                if current and qty and current<qty then changed=true end
+            end
+        end
+        craftTracker.status=changed and "Craft consumed resources but no rod: likely failed; automatic retries paused"
+            or "Craft not confirmed; automatic retries paused for safety"
+        craftTracker.pendingAt=0
+        craftTracker.manualReview=true
+        return
+    end
     if not (state.autoCraftRod or state.autoFarmMaterials) then
         craftTracker.route=nil
         craftTracker.status="OFF"
         return
     end
-    if state.autoFarmMaterials and not state.protectMaterials then
+    if (state.autoFarmMaterials or state.autoCraftRod) and not state.protectMaterials then
         craftTracker.route=nil
         craftTracker.status="STOPPED: turn ON Protect Craft Materials before farming"
         return
@@ -1623,29 +2084,6 @@ local function craftTick()
                 end
             end
         end
-    end
-    if craftTracker.pendingAt>0 then
-        if ownedRod(target) then
-            craftTracker.pendingAt=0
-            craftTracker.lastSuccessful=target
-            craftTracker.status="CRAFT SUCCESS verified: "..target
-            notify("Crafted "..target.."! Server inventory confirms ownership.")
-            return
-        end
-        if os.clock()-craftTracker.pendingAt<12 then return end
-        local changed=false
-        if craftTracker.lastBefore then
-            local old=craftTracker.lastBefore
-            local newGems=candidateValue(playerData(),{"Crystals","Crystal","Gems","Gem"})
-            if newGems and old.gem and newGems<old.gem then changed=true end
-            for fish,qty in pairs(old.fish) do
-                local current=ownedFishCount(fish)
-                if current and qty and current<qty then changed=true end
-            end
-        end
-        craftTracker.status=changed and "Craft consumed resources but no rod: likely failed (check UI)"
-            or "Craft not confirmed; retry blocked until resources and cooldown"
-        craftTracker.pendingAt=0
     end
     if ownedRod(target) then
         craftTracker.route=nil
@@ -1676,32 +2114,38 @@ local function craftTick()
             if (ownedBaitCount(missing.bait) or 0)>0 then equipSpecialBait(missing.bait) end
         end
     end
-    if note=="All four recipe fish present" then
+    if note=="All live recipe materials present" then
         if state.autoCraftRod then beginCraftAttempt() else craftTracker.status="Ready to craft "..target.." (Auto Craft OFF)" end
     end
 end
 local function findQuestNPC(query,location)
-    local folder=workspace:FindFirstChild("NPC") or workspace:FindFirstChild("NPCs")
-    if not folder then return nil,nil end
+    local folders={}
+    for _,folderName in ipairs({"NPC","NPCs","Merchant","NPCDialogue"}) do
+        local folder=workspace:FindFirstChild(folderName)
+        if folder then table.insert(folders,folder) end
+    end
+    if #folders==0 then return nil,nil end
     local aliases= (query=="sage") and {"sageyijiu","sageyiju","sageeugene"}
         or (query=="ticket") and {"ticketquestgiver"}
         or (query=="zeng") and {"zengtianguo"}
         or {fold(query)}
     local best,bestDist=nil,math.huge
     local reference=location and cframeIsland(location)
-    for _,model in ipairs(folder:GetDescendants()) do
-        if model:IsA("Model") or model:IsA("BasePart") then
-            local name=fold(model.Name)..fold(model:GetAttribute("Name") or "")
-            local matches=false
-            for _,alias in ipairs(aliases) do
-                if name:find(alias,1,true) then matches=true;break end
-            end
-            if matches then
-                local part=getPart(model)
-                if part then
-                    local distance=reference and (part.Position-reference.Position).Magnitude or 0
-                    if distance<bestDist and (not reference or distance<550) then
-                        best,bestDist=part,distance
+    for _,folder in ipairs(folders) do
+        for _,model in ipairs(folder:GetDescendants()) do
+            if model:IsA("Model") or model:IsA("BasePart") then
+                local name=fold(model.Name)..fold(model:GetAttribute("Name") or "")
+                local matches=false
+                for _,alias in ipairs(aliases) do
+                    if name:find(alias,1,true) then matches=true;break end
+                end
+                if matches then
+                    local part=getPart(model)
+                    if part then
+                        local distance=reference and (part.Position-reference.Position).Magnitude or 0
+                        if distance<bestDist and (not reference or distance<550) then
+                            best,bestDist=part,distance
+                        end
                     end
                 end
             end
@@ -1744,13 +2188,19 @@ local function replicatedObjectivesComplete(q)
 end
 local function startNPCDialogue(part)
     if not part then return false end
-    local p=part.Parent
-    local prompt=p and p:FindFirstChildWhichIsA("ProximityPrompt",true)
-    if not prompt then prompt=part:FindFirstChildWhichIsA("ProximityPrompt",true) end
+    local cursor=part
+    local prompt=nil
+    local detector=nil
+    for _=1,4 do
+        if not cursor then break end
+        prompt=prompt or cursor:FindFirstChildWhichIsA("ProximityPrompt",true)
+        detector=detector or cursor:FindFirstChildWhichIsA("ClickDetector",true)
+        if prompt or detector then break end
+        cursor=cursor.Parent
+    end
     if prompt and prompt.Enabled and type(fireproximityprompt)=="function" then
         return pcall(function() fireproximityprompt(prompt) end)
     end
-    local detector=p and p:FindFirstChildWhichIsA("ClickDetector",true)
     if detector and type(fireclickdetector)=="function" then
         return pcall(function() fireclickdetector(detector) end)
     end
@@ -1774,7 +2224,7 @@ local function clickQuestDialogue(wanted)
         if obj:IsA("GuiButton") and guiVisible(obj) then
             local label=buttonActionText(obj)
             if label:find("accept",1,true) or label:find("claim",1,true)
-                or label:find("complete",1,true) or label:find("quest",1,true) then
+                or label:find("complete",1,true) then
                 candidate=obj; break
             end
         end
@@ -1839,8 +2289,10 @@ local function sageQuestTick()
     questTracker.lastInteract=os.clock()
     if sage then
         if (sage.Position-root.Position).Magnitude>11 then
+            hub.manualTravelUntil=os.clock()+18
             teleportTo(sage.CFrame*CFrame.new(0,0,-5),"Battlefield Sage")
         else
+            hub.manualTravelUntil=os.clock()+18
             local triggered=startNPCDialogue(sage)
             if triggered then questTracker.status=phase..": Sage dialogue prompted; waiting for quest data" end
         end
@@ -1867,7 +2319,9 @@ local function dialogueGiver(name)
     local exact=fun and fun:FindFirstChild(name)
     if exact then return exact,getPart(exact) end
     local pt=findQuestNPC(name=="Ticket Quest Giver" and "ticket" or "zeng")
-    return pt,pt
+    if not pt then return nil,nil end
+    local model=pt:FindFirstAncestorOfClass("Model")
+    return model or pt,pt
 end
 local function currentTicketQuest()
     local p=playerData()
@@ -1891,8 +2345,7 @@ local function ticketQuestTick()
         for _,obj in ipairs(box:GetDescendants()) do
             if obj:IsA("TextLabel") and obj.Text:lower():find("daily limit",1,true) then
                 questTracker.ticketStatus="Daily ticket limit reached (paused)"
-                state.autoTicketQuests=false
-                if callbacks.autoTicketQuests then callbacks.autoTicketQuests() end
+                setState("autoTicketQuests",false)
                 if hub.refreshQuestPicker then hub.refreshQuestPicker() end
                 return
             end
@@ -1988,8 +2441,15 @@ local function sideQuestStatus()
 end
 local function discoverLiveQuestModules()
     local info=ReplicatedStorage:FindFirstChild("Info")
-    local defs=info and info:FindFirstChild("MainQuest")
-    if not defs then return nil,"ReplicatedStorage.Info.MainQuest is not replicated" end
+    if not info then return nil,"ReplicatedStorage.Info is not replicated" end
+    local roots={}
+    for _,folderName in ipairs({"MainQuest","SideQuest","NPCQuest","DailyQuest","EventQuest","WeeklyQuest","Quest"}) do
+        local folder=info:FindFirstChild(folderName)
+        if folder and (folder:IsA("Folder") or folder:IsA("Configuration")) then
+            table.insert(roots,folder)
+        end
+    end
+    if #roots==0 then return nil,"No known quest-definition folders are replicated" end
     local found={}
     local function rewardHint(value,depth)
         if depth>3 or type(value)~="table" then return nil end
@@ -2010,39 +2470,64 @@ local function discoverLiveQuestModules()
         end
         return nil
     end
-    for _,module in ipairs(defs:GetChildren()) do
-        if module:IsA("ModuleScript") then
-            local ok,rows=pcall(require,module)
-            local objectiveCount=(ok and type(rows)=="table") and #rows or 0
-            local reward=module:GetAttribute("Reward")
-            if type(reward)~="string" or reward=="" then
-                reward=(ok and type(rows)=="table") and rewardHint(rows,0) or nil
+    local seen={}
+    for _,root in ipairs(roots) do
+        for _,module in ipairs(root:GetChildren()) do
+            if module:IsA("ModuleScript") then
+                local id=root.Name.."/"..module.Name
+                if not seen[id] then
+                    seen[id]=true
+                    local ok,rows=pcall(require,module)
+                    local objectiveCount=(ok and type(rows)=="table") and #rows or 0
+                    local reward=module:GetAttribute("Reward")
+                    if type(reward)~="string" or reward=="" then
+                        reward=(ok and type(rows)=="table") and rewardHint(rows,0) or nil
+                    end
+                    table.insert(found,{
+                        name=id,folder=root.Name,objectiveCount=objectiveCount,
+                        reward=(type(reward)=="string" and reward~="") and reward or "Not exposed by live objective module",
+                        readable=ok and type(rows)=="table",
+                    })
+                end
             end
-            table.insert(found,{
-                name=module.Name,
-                objectiveCount=objectiveCount,
-                reward=(type(reward)=="string" and reward~="") and reward or "Not exposed by live objective module",
-                readable=ok and type(rows)=="table",
-            })
         end
     end
     table.sort(found,function(a,b) return a.name:lower()<b.name:lower() end)
     return found
 end
+
 local function questTick()
     if not state.autoQuests then
         questTracker.status="OFF"
         questTracker.sageRoute=nil
+        hub.questAutomationChanging=true
+        for flag in pairs(hub.questManagedFlags) do
+            if state[flag] then setState(flag,false) end
+            hub.questManagedFlags[flag]=nil
+        end
+        hub.questAutomationChanging=false
         return
     end
     if state.autoDailyQuest then claimCompletedDailies() end
     sageQuestTick()
     -- Independent Auto Quest mode can start fishing when Sage goals need catches.
     if state.autoSageAfterAmber and questTracker.sageRoute=="Amber Isle" then
+        hub.questAutomationChanging=true
         for _,flag in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam",
                               "charge","rhythm","phase2"}) do
-            if not state[flag] then setState(flag,true) end
+            if not state[flag] then
+                hub.questManagedFlags[flag]=true
+                setState(flag,true)
+            end
         end
+        hub.questAutomationChanging=false
+    else
+        hub.questAutomationChanging=true
+        for flag in pairs(hub.questManagedFlags) do
+            if state[flag] then setState(flag,false) end
+            hub.questManagedFlags[flag]=nil
+        end
+        hub.questAutomationChanging=false
     end
     ticketQuestTick()
     zengQuestTick()
@@ -2058,47 +2543,53 @@ local function activeFarmOverride()
     end
     return nil
 end
-local lastAuxRoute=-math.huge
 local function auxiliaryFarmTick()
     if state.autoLevel or not state.autoRoute then return end
-    local island,reason=activeFarmOverride()
+    local island=activeFarmOverride()
     if not island or (os.clock()<(hub.manualTravelUntil or 0)) then return end
     local now=os.clock()
-    if now-lastAuxRoute<12 or isShopping() or buyerTripActive() or sellTracker.pending then return end
-    local _,root,hum=getChar()
-    local _,fishing=minigame()
-    local cf=cframeIsland(island)
-    if not root or not hum or hum.Health<=0 or fishing or not cf then return end
-    if (root.Position-cf.Position).Magnitude>230 then
-        lastAuxRoute=now
-        teleportTo(cf,reason.." fishing at "..island)
-        facingTracker.lastAt=0
-    end
+    if isShopping() or buyerTripActive() or sellTracker.pending then return end
+    -- Use the same verified dock/sea-facing gate as Auto Level so quest and
+    -- material farming cannot cast immediately after an unverified teleport.
+    hub.routeTravelTick(now,island)
 end
 local function scanMerchants()
-    local npc=workspace:FindFirstChild("NPC") or workspace:FindFirstChild("NPCs")
+    local folders={}
+    for _,folderName in ipairs({"NPC","NPCs","Merchant","NPCDialogue"}) do
+        local folder=workspace:FindFirstChild(folderName)
+        if folder then table.insert(folders,folder) end
+    end
     merchantTracker.Maoshan=nil
     merchantTracker.Taoist=nil
-    if not npc then return end
-    for _,obj in ipairs(npc:GetDescendants()) do
-        if obj:IsA("Model") or obj:IsA("BasePart") then
-            local name=fold(obj.Name)..fold(obj:GetAttribute("Name") or "")
-            local kind=nil
-            if name:find("maoshan",1,true) or name:find("maosan",1,true) then kind="Maoshan"
-            elseif name:find("taoist",1,true) or name:find("taosi",1,true) then kind="Taoist" end
-            if kind then
-                local part=getPart(obj)
-                if part and part:IsDescendantOf(workspace) then
-                    if not merchantTracker[kind] then merchantTracker[kind]=part end
+    merchantTracker.Halloween=nil
+    merchantTracker.Samba=nil
+    if #folders==0 then
+        for _,kind in ipairs({"Maoshan","Taoist","Halloween","Samba"}) do merchantTracker.lastSeen[kind]=false end
+        return
+    end
+    for _,npc in ipairs(folders) do
+        for _,obj in ipairs(npc:GetDescendants()) do
+            if obj:IsA("Model") or obj:IsA("BasePart") then
+                local name=fold(obj.Name)..fold(obj:GetAttribute("Name") or "")
+                local kind=nil
+                if name:find("maoshan",1,true) or name:find("maosan",1,true) then kind="Maoshan"
+                elseif name:find("taoist",1,true) or name:find("taosi",1,true) then kind="Taoist"
+                elseif name:find("halloween",1,true) then kind="Halloween"
+                elseif name:find("samba",1,true) then kind="Samba" end
+                if kind then
+                    local part=getPart(obj)
+                    if part and part:IsDescendantOf(workspace) then
+                        if not merchantTracker[kind] then merchantTracker[kind]=part end
+                    end
                 end
             end
         end
     end
-    for _,kind in ipairs({"Maoshan","Taoist"}) do
+    for _,kind in ipairs({"Maoshan","Taoist","Halloween","Samba"}) do
         local part=merchantTracker[kind]
         if state.merchantAlerts and part and not merchantTracker.lastSeen[kind] then
             merchantTracker.alerts=merchantTracker.alerts+1
-            notify(kind.." merchant detected! TAP the popup to teleport; loaded server NPC only.")
+            notify(kind.." NPC detected! TAP the popup to teleport; loaded server NPC only.")
         end
         merchantTracker.lastSeen[kind]=part~=nil
     end
@@ -2117,7 +2608,7 @@ local function tpMerchant(kind)
     return teleportTo(part.CFrame*CFrame.new(0,0,-7),kind.." merchant")
 end
 
-return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, discoverLiveQuestModules=discoverLiveQuestModules, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
+return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, scanLiveRodData=scanLiveRodData, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, discoverLiveQuestModules=discoverLiveQuestModules, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
 end)()
 
 function hub.armAutoRoute()
@@ -2127,7 +2618,6 @@ function hub.armAutoRoute()
     hub.routeGate.lastAttempt=-math.huge
     hub.routeGate.lastTeleport=0
     lastAutoLevelTick=-math.huge -- first route evaluation must run before the first cast
-    lastAutoRoute=0
 end
 function hub.dockDistance(root, cf)
     local p=root.Position
@@ -2136,7 +2626,14 @@ function hub.dockDistance(root, cf)
     return math.sqrt(x*x+z*z),math.abs(p.Y-t.Y)
 end
 function hub.routeReadyForCast(island)
-    if not state.autoLevel or not state.autoRoute then return true end
+    if os.clock()<(hub.manualTravelUntil or 0) then
+        hub.routeGate.ready=false
+        hub.routeGate.status="Manual travel / NPC interaction active"
+        return false
+    end
+    if not state.autoRoute then return true end
+    local override=ext.activeFarmOverride()
+    if not state.autoLevel and not override then return true end
     if not hub.routeGate.ready or hub.routeGate.island~=island then return false end
     local _,root,hum=getChar()
     local cf=cframeIsland(island)
@@ -2228,6 +2725,7 @@ pcall(function()
     if type(gethui) == "function" then container = gethui()
     else container = game:GetService("CoreGui") end
 end)
+if typeof(container)~="Instance" then container=PlayerGui end
 local GUI = Instance.new("ScreenGui")
 GUI.Name = "KITKIT_HeavyweightFishing_GUI"
 GUI.ResetOnSpawn = false
@@ -2235,7 +2733,7 @@ GUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 GUI.DisplayOrder = 1000
 GUI.IgnoreGuiInset = true
 local parented = pcall(function() GUI.Parent = container end)
-if not parented then GUI.Parent = PlayerGui end
+if not parented or GUI.Parent==nil then GUI.Parent = PlayerGui end
 hub.gui = GUI
 
 local colors = {
@@ -2331,7 +2829,7 @@ local title = make("TextLabel", header, {
 })
 local headerSubtitle = make("TextLabel", header, {
     BackgroundTransparency = 1,
-    Text = "FISHING AUTOMATION  /  2.7",
+    Text = "FISHING AUTOMATION  /  2.8",
     TextXAlignment = Enum.TextXAlignment.Left,
     Font = Enum.Font.GothamMedium,
     TextSize = 11,
@@ -2675,7 +3173,8 @@ local function toggle(parent, label, key, onChange)
         btn.TextColor3 = state[key] and colors.bg or colors.muted
         btn.BackgroundColor3 = state[key] and colors.accent or colors.row
     end
-    callbacks[key] = refresh
+    callbacks[key] = callbacks[key] or {}
+    table.insert(callbacks[key], refresh)
     refresh()
     track(btn.MouseButton1Click:Connect(function()
         setState(key, not state[key])
@@ -2707,14 +3206,14 @@ local function stepper(parent, label, key, minVal, maxVal, jump, suffix)
     local function refresh()
         number.Text = tostring(state[key]) .. (suffix or "")
     end
+    callbacks[key] = callbacks[key] or {}
+    table.insert(callbacks[key], refresh)
     refresh()
     track(minus.MouseButton1Click:Connect(function()
-        state[key] = math.max(minVal, math.floor((state[key]-jump)*100+0.5)/100)
-        refresh()
+        setState(key, math.max(minVal, math.floor((state[key]-jump)*100+0.5)/100))
     end))
     track(plus.MouseButton1Click:Connect(function()
-        state[key] = math.min(maxVal, math.floor((state[key]+jump)*100+0.5)/100)
-        refresh()
+        setState(key, math.min(maxVal, math.floor((state[key]+jump)*100+0.5)/100))
     end))
 end
 
@@ -2775,7 +3274,7 @@ local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
     end
     btn.Text=active and "STOP AUTO LEVEL" or "START AUTO LEVEL TO 500"
 end,true)
-action(levelPage,"QUICK START: LEVEL + SELL + QUESTS",function()
+action(levelPage,"QUICK START: LEVEL + SELL + SELECTED QUESTS",function()
     -- Convenience preset; all three remain individually toggleable.
     if not state.autoLevel then
         setState("autoRoute",true)
@@ -2786,43 +3285,39 @@ action(levelPage,"QUICK START: LEVEL + SELL + QUESTS",function()
     end
     setState("autoSell",true)
     setState("autoQuests",true)
+    setState("stayIsland",false)
+    setState("autoRoute",true)
     setState("autoFavorite",true)
-    setState("fastSell",true)
     setState("sellNearFull",false)
     setState("autoEnzo",false)
     setState("autoLong",false)
     lastCatchAt=os.clock()
-    notify("Quick Start ON. Auto Sell & Auto Quests can be disabled separately in their tabs.")
+    firstProfileAt=os.clock()
+    lastProfileLevel=nil
+    lastProfileXP=nil
+    levelGained=0
+    notify("Quick Start ON. Auto Sell is enabled; choose questlines in Quests before any quest automation runs.")
 end,true)
-toggle(levelPage,"Auto route based on equipped rod Power","autoRoute")
+toggle(levelPage,"Auto route based on equipped rod Power","autoRoute",function(v)
+    if v and state.stayIsland then setState("stayIsland",false) end
+end)
 toggle(levelPage,"Auto face sea before casting","autoSeaFacing")
 toggle(levelPage,"Auto shop one best rod per island (UI)","autoBuyRod")
 toggle(levelPage,"Auto claim eligible free codes","autoCodes")
 toggle(levelPage,"Favorite rare fish before selling","autoFavorite")
-toggle(levelPage,"FAST SELL (will sell non-favorites)","fastSell",function(v)
-    if v then notify("FAST SELL ON: rare catches can be sold! Turn OFF to protect them.") end
-end)
 stepper(levelPage,"Goal level","targetLevel",50,2000,50,"")
 stepper(levelPage,"Sell interval","sellDelay",15,300,15,"s")
 stepper(levelPage,"Cast recovery delay","castDelay",0.4,3,0.1,"s")
 section(levelPage,"Rod shop: one target per island")
 action(levelPage,"FIND NEAREST ROD SELLER",function()
     local _,hrp=getChar()
-    local npc=workspace:FindFirstChild("NPC")
-    if not hrp or not npc then notify("Character/NPCs not loaded") return end
-    local best,bestDistance=nil,math.huge
-    for _,model in ipairs(npc:GetDescendants()) do
-        local low=model.Name:lower()
-        if low=="biao di" or low=="rod seller" then
-            local part=getPart(model)
-            if part then
-                local distance=(part.Position-hrp.Position).Magnitude
-                if distance<bestDistance then best,bestDistance=part,distance end
-            end
-        end
-    end
-    if best then teleportTo(best.CFrame*CFrame.new(0,0,-6),"Rod Seller (buy manually)")
-    else notify("Rod Seller not loaded; use the game's island NPC list") end
+    local vendor=findRodVendor(true)
+    local part=getPart(vendor)
+    if not hrp then notify("Character not loaded") return end
+    if part then
+        hub.manualTravelUntil=os.clock()+65
+        teleportTo(part.CFrame*CFrame.new(0,0,-6),"Rod Seller (buy manually)")
+    else notify("Rod Seller not loaded in NPC / Merchant folders") end
 end)
 action(levelPage,"SHOW NEXT ROD UPGRADE",function()
     local p=profile()
@@ -2845,6 +3340,30 @@ action(levelPage,"RECHECK LEVEL/ROD NOW",function()
     local p=profile()
     local _,pow=routeChoice(p)
     notify("Level "..tostring(p.level or "?").."; Rod "..tostring(p.rod).."; Power "..tostring(pow or "?").."; Cash "..tostring(p.cash or "?"))
+end)
+action(levelPage,"SCAN PURE GOLDEN / KRAKEN LIVE STATS",function()
+    local lines={}
+    for _,name in ipairs({"Pure Golden Rod","Kraken Rod"}) do
+        local data=itemModule(name)
+        local power=rodPower(name)
+        local price,verified=shopPrice(name,nil)
+        local island=data and resolveRodIsland(data) or nil
+        lines[#lines+1]=name..": Power="..tostring(power or "unknown")
+            ..", CashPrice="..tostring(price or "unknown")..(verified and " (live)" or " (unverified)")
+            ..", Island="..tostring(island or "unknown")
+    end
+    notify(table.concat(lines," | "))
+end)
+action(levelPage,"SCAN ALL LIVE RODS / CRAFT RECIPES",function()
+    local rows,err=ext.scanLiveRodData()
+    if err then notify(err);return end
+    for _,item in ipairs(rows) do
+        print(('[KITKIT ROD] %s | Power=%s | Cash=%s%s | Island=%s | Craftable=%s | Ingredients=%s'):format(
+            item.name,tostring(item.power or "unknown"),tostring(item.price or "unknown"),
+            item.verifiedPrice and " (live)" or " (unverified)",tostring(item.island or "unknown"),
+            tostring(item.craftable),item.ingredients~="" and item.ingredients or "none exposed"))
+    end
+    notify("Scanned "..#rows.." live rod modules. Details printed to console; unknown stats are not guessed.")
 end)
 
 -- Quest selection board: a searchable multi-select modal, separate from Auto Level.
@@ -2869,7 +3388,7 @@ local function buildQuestUI()
         notify(v and "Quest engine ON. Only selected supported handlers will run." or "Quest engine OFF")
     end)
 
-    local QUEST_FILTERS = {"All rewards", "Rods", "Skills", "Orbs", "Tickets", "Seasonal", "Other"}
+    local QUEST_FILTERS = {"All rewards", "Rods", "Skills", "Orbs", "Tickets", "Daily", "Seasonal", "Other"}
     local questFilter = "All rewards"
     local questSearchText = ""
     local liveQuestEntries = {}
@@ -3104,8 +3623,9 @@ local function buildQuestUI()
         if questFilter == "Skills" then return kind == "Skill" end
         if questFilter == "Orbs" then return kind == "Orb" end
         if questFilter == "Tickets" then return kind == "Ticket" end
+        if questFilter == "Daily" then return kind == "Daily" end
         if questFilter == "Seasonal" then return kind == "Seasonal" or kind == "Rod Skin" end
-        return kind == "Daily" or kind == "Other" or kind == "Unknown"
+        return kind == "Other" or kind == "Unknown"
     end
     local function questSearchMatches(entry)
         local q = string.lower(questSearchText or "")
@@ -3359,7 +3879,7 @@ local function buildQuestUI()
         notify("Ticket quest difficulty: " .. value)
     end)
 
-    action(questPage, "SCAN LIVE QUEST MODULES + REWARDS", function()
+    action(questPage, "SCAN LIVE QUEST MODULES + REWARD DATA", function()
         local modules, err = ext.discoverLiveQuestModules()
         if not modules then notify(err or "Live quest modules unavailable"); return end
         liveQuestEntries = {}
@@ -3431,10 +3951,13 @@ local craftHUD=make("TextLabel",craftPage,{
 })
 round(craftHUD,9);edge(craftHUD,colors.outline,0.72)
 action(craftPage,"TARGET ROD: Heavenpiercer Rod",function(btn)
+    if ext.craftTracker.pendingAt>0 or ext.craftTracker.manualReview or ext.craftTracker.baitPending then
+        notify("Cannot switch craft target while a craft result is pending or under manual review.")
+        return
+    end
     state.craftTarget=state.craftTarget=="Heavenpiercer Rod" and "Pure Diamond Rod" or "Heavenpiercer Rod"
     ext.craftTracker.status="Target changed; protecting ingredients for "..state.craftTarget
     ext.craftTracker.lastBefore=nil
-    ext.craftTracker.pendingAt=0
     btn.Text="TARGET ROD: "..state.craftTarget
     notify("Craft target: "..state.craftTarget)
 end)
@@ -3451,13 +3974,18 @@ toggle(craftPage,"AUTO FARM MATERIAL FISH","autoFarmMaterials",function(v)
     end
 end)
 toggle(craftPage,"AUTO CRAFT ROD (spends Gems!)","autoCraftRod",function(v)
-    if v then notify("Auto Craft ON: verified materials + Gems will be spent when ready. Failure is possible!") end
+    if v and not state.protectMaterials then
+        setState("autoCraftRod",false)
+        notify("Turn on ingredient protection before auto-crafting.")
+    elseif v then notify("Auto Craft ON: one attempt at a time; after an unconfirmed result, manually unlock the next attempt.") end
 end)
 toggle(craftPage,"Auto craft special bait if recipe known","autoCraftBait")
-toggle(craftPage,"Protect target fish from Auto Sell","protectMaterials",function(v)
-    if not v and state.autoFarmMaterials then
+toggle(craftPage,"Protect all known craft ingredients from Auto Sell","protectMaterials",function(v)
+    if not v and (state.autoFarmMaterials or state.autoCraftRod or state.autoCraftBait) then
         setState("autoFarmMaterials",false)
-        notify("Material farming stopped: protection must remain ON.")
+        setState("autoCraftRod",false)
+        setState("autoCraftBait",false)
+        notify("Material farming and auto-crafting stopped: ingredient protection must remain ON.")
     end
 end)
 toggle(craftPage,"Auto favorite protected fish","autoFavorite")
@@ -3477,10 +4005,26 @@ action(craftPage,"CHECK CRAFT REQUIREMENTS NOW",function()
     print("[KITKIT CRAFT] Game crafting module="..tostring(ext.liveCraftModule(name)))
     notify("Craft requirements printed to console; status: "..ext.craftTracker.status)
 end)
-action(craftPage,"CRAFT ONE IF VERIFIED (AUTO CRAFT ON)",function()
-    if not state.autoCraftRod then notify("Enable Auto Craft first so Gem spending is intentional") return end
+action(craftPage,"CRAFT SELECTED ROD NOW (ONE ATTEMPT)",function()
     ext.beginCraftAttempt()
-    notify(ext.craftTracker.status)
+end)
+action(craftPage,"ACKNOWLEDGE RESULT / UNLOCK ONE MORE ATTEMPT",function()
+    if ext.craftTracker.pendingAt>0 then
+        notify("Craft request is still pending; wait for server confirmation first.")
+        return
+    end
+    ext.craftTracker.manualReview=false
+    ext.craftTracker.lastAt=-math.huge
+    notify("One more craft attempt unlocked. Live ingredients and Gem price must still verify.")
+end)
+action(craftPage,"ACKNOWLEDGE BAIT RESULT / UNLOCK",function()
+    if ext.craftTracker.baitPending then
+        notify("Bait request is still pending; wait for inventory confirmation first.")
+        return
+    end
+    ext.craftTracker.baitManualReview={}
+    ext.craftTracker.lastBaitAt=-math.huge
+    notify("Bait craft review acknowledged. Recipe, materials and currency will be checked again.")
 end)
 make("TextLabel",craftPage,{
     Text="Weather must match to farm each weather fish. Rainbow/Frost bait fish require bait. Missing live recipe, Gem balance, or fish blocks crafting; server decides success. We never claim a craft succeeded without the rod in your inventory.",
@@ -3574,8 +4118,14 @@ action(bossPage, "Boss mode: Normal / Hard", function(btn)
 end)
 action(bossPage, "START ENZO ONCE", function() startBoss("Enzo") end)
 action(bossPage, "START LONG DIAOHAI ONCE", function() startBoss("Long Diaohai") end)
-action(bossPage, "TP - ENZO", function() teleportTo(BOSS_POS.Enzo, "Enzo area") end)
-action(bossPage, "TP - LONG DIAOHAI", function() teleportTo(BOSS_POS["Long Diaohai"], "Long Diaohai area") end)
+action(bossPage, "TP - ENZO", function()
+    hub.manualTravelUntil=os.clock()+60
+    teleportTo(BOSS_POS.Enzo, "Enzo area")
+end)
+action(bossPage, "TP - LONG DIAOHAI", function()
+    hub.manualTravelUntil=os.clock()+60
+    teleportTo(BOSS_POS["Long Diaohai"], "Long Diaohai area")
+end)
 section(bossPage, "Boss detection / ESP")
 toggle(bossPage, "Show loaded boss ESP", "bossESP", function(v)
     if not v then clearESP() else scanBosses() end
@@ -3588,6 +4138,7 @@ end)
 action(bossPage, "TP TO DETECTED SECRET BOSS", function()
     local b = scanBosses()
     if b.firstSecret then
+        hub.manualTravelUntil=os.clock()+60
         teleportTo(b.firstSecret.part.CFrame * CFrame.new(0, 0, -8), b.firstSecret.name)
     else
         notify("No secret boss object currently loaded on your client")
@@ -3595,40 +4146,44 @@ action(bossPage, "TP TO DETECTED SECRET BOSS", function()
 end)
 action(bossPage, "TP TO FIRST DETECTED BOSS", function()
     local b = scanBosses()
-    if b.first then teleportTo(b.first.part.CFrame * CFrame.new(0, 0, -8), b.first.name)
+    if b.first then
+        hub.manualTravelUntil=os.clock()+60
+        teleportTo(b.first.part.CFrame * CFrame.new(0, 0, -8), b.first.name)
     else notify("No boss object currently loaded") end
 end)
 
 section(worldPage,"Roaming NPCs: click to teleport")
-toggle(worldPage,"Popup when Maoshan/Taoist is loaded","merchantAlerts")
-action(worldPage,"REFRESH MAOSHAN / TAOIST SCAN",function()
+toggle(worldPage,"Popup when roaming / event NPCs load","merchantAlerts")
+action(worldPage,"REFRESH NPC / EVENT SCAN",function()
     ext.scanMerchants()
     local parts={}
-    for _,name in ipairs({"Maoshan","Taoist"}) do
+    for _,name in ipairs({"Maoshan","Taoist","Halloween","Samba"}) do
         parts[#parts+1]=name.."="..(ext.merchantTracker[name] and "HERE" or "not loaded")
     end
     notify(table.concat(parts," | "))
 end)
 action(worldPage,"TP TO MAOSHAN (if spawned)",function() ext.tpMerchant("Maoshan") end)
 action(worldPage,"TP TO TAOIST (if spawned)",function() ext.tpMerchant("Taoist") end)
+action(worldPage,"TP TO HALLOWEEN EVENT NPC",function() ext.tpMerchant("Halloween") end)
+action(worldPage,"TP TO SAMBA NPC",function() ext.tpMerchant("Samba") end)
 -- Clickable toast stays visible even when the main window is minimized.
 local roamingPopup=make("Frame",GUI,{
     Name="MerchantAlerts", BackgroundColor3=colors.panel,BorderSizePixel=0,
-    Position=UDim2.new(1,-260,0,92), Size=UDim2.fromOffset(244,106),
+    Position=UDim2.new(1,-260,0,92), Size=UDim2.fromOffset(244,174),
     Visible=false, ZIndex=20,
 })
 round(roamingPopup,9);edge(roamingPopup,colors.gold)
 make("TextLabel",roamingPopup,{
-    Text="MERCHANT NEARBY",TextColor3=colors.accent,
+    Text="NPC / EVENT NEARBY",TextColor3=colors.accent,
     BackgroundTransparency=1,TextSize=12,Font=Enum.Font.GothamBold,
     Size=UDim2.new(1,-16,0,22),Position=UDim2.fromOffset(8,2),ZIndex=21,
 })
 local merchantButtons={}
-for i,name in ipairs({"Maoshan","Taoist"}) do
+for i,name in ipairs({"Maoshan","Taoist","Halloween","Samba"}) do
     local btn=make("TextButton",roamingPopup,{
         Text=name.."   /   teleport",BackgroundColor3=colors.row,
         TextColor3=colors.white,Font=Enum.Font.GothamMedium,TextSize=12,
-        Position=UDim2.fromOffset(8,28+(i-1)*34),
+            Position=UDim2.fromOffset(8,26+(i-1)*35),
         Size=UDim2.new(1,-16,0,30),Visible=false,ZIndex=21,
     })
     round(btn,5)
@@ -3676,14 +4231,24 @@ action(worldPage, "SELECTED ISLAND: Beginning Isle", function(btn)
     btn.Text = "SELECTED ISLAND: " .. state.selectedIsland
 end)
 action(worldPage, "TELEPORT TO SELECTED ISLAND", function()
+    hub.manualTravelUntil=os.clock()+45
     teleportTo(cframeIsland(state.selectedIsland), state.selectedIsland)
 end, true)
-toggle(worldPage, "Return to selected island while idle", "stayIsland")
+toggle(worldPage, "Return to selected island while idle", "stayIsland", function(v)
+    if v and state.autoLevel then
+        setState("stayIsland",false)
+        notify("Stay Island is a manual-fishing mode. Stop Auto Level first.")
+    elseif v then
+        setState("autoRoute",false)
+        notify("Stay Island enabled; Auto Route disabled to prevent conflicting teleports.")
+    end
+end)
 for _, item in ipairs(ISLANDS) do
     local targetName = item[1]
     local targetCF = CFrame.new(item[2], item[3], item[4])
     action(worldPage, "TP  /  " .. targetName, function()
         state.selectedIsland = targetName
+        hub.manualTravelUntil=os.clock()+45
         teleportTo(targetCF, targetName)
     end)
 end
@@ -3705,10 +4270,13 @@ action(extraPage, "SAVE CURRENT POSITION", function()
     if root then savedCFrame = root.CFrame; notify("Position saved for this session") end
 end)
 action(extraPage, "RETURN TO SAVED POSITION", function()
-    if savedCFrame then teleportTo(savedCFrame, "saved position")
+    if savedCFrame then
+        hub.manualTravelUntil=os.clock()+45
+        teleportTo(savedCFrame, "saved position")
     else notify("No saved position yet") end
 end)
 action(extraPage, "TELEPORT TO WEATHER ISLE", function()
+    hub.manualTravelUntil=os.clock()+45
     teleportTo(cframeIsland("Weather Isle"), "Weather Isle")
 end)
 action(extraPage, "REJOIN GAME", function()
@@ -3743,7 +4311,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.7 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.8.1 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
@@ -3766,8 +4334,10 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
             " Zeng="..ext.questTracker.zengStatus,
         "Craft="..ext.craftTracker.status.." Target="..state.craftTarget..
             " Attempts="..ext.craftTracker.attempts,
-        "Merchant Maoshan="..tostring(ext.merchantTracker.Maoshan~=nil)..
-            " Taoist="..tostring(ext.merchantTracker.Taoist~=nil),
+        "NPC Maoshan="..tostring(ext.merchantTracker.Maoshan~=nil)..
+            " Taoist="..tostring(ext.merchantTracker.Taoist~=nil)..
+            " Halloween="..tostring(ext.merchantTracker.Halloween~=nil)..
+            " Samba="..tostring(ext.merchantTracker.Samba~=nil),
         "AutoBuy="..tostring(state.autoBuyRod).." SeaFacing="..tostring(state.autoSeaFacing),
         "Data child keys="..table.concat(dataNames,", "),
         "Event names="..table.concat(names,", "),
@@ -3865,13 +4435,12 @@ local function skillReady(char, key, fg)
     local obj = nil
     if skills then
         for _, s in ipairs(skills:GetChildren()) do
-            if s:IsA("NumberValue") and tostring(s:GetAttribute("Key") or s.Name) == key then
+            if s:IsA("NumberValue") and tostring(s:GetAttribute("Key") or s:GetAttribute("Hotkey") or s:GetAttribute("Slot") or s.Name):upper() == key then
                 obj = s
                 break
             end
         end
     end
-    if skills and #skills:GetChildren() > 0 and not obj then return false end
     if obj then
         if obj.Value > 0 or (tonumber(obj:GetAttribute("UsingSkill")) or 0) > 0 then return false end
     end
@@ -3952,7 +4521,7 @@ local function handleRhythm(fg, now)
                             local code = Enum.KeyCode[lane]
                             vim:SendKeyEvent(true, code, false, game)
                             task.delay(0.03, function()
-                                if hub.running then vim:SendKeyEvent(false, code, false, game) end
+                                pcall(function() vim:SendKeyEvent(false, code, false, game) end)
                             end)
                         end)
                     end
@@ -3987,14 +4556,19 @@ local function phase2Click(fg, now)
                 end
             end)
         end
-        if not done then
-            pcall(function()
-                local vim = game:GetService("VirtualInputManager")
-                vim:SendMouseButtonEvent(0, 0, 0, true, game, 0)
-                task.delay(0.015, function()
-                    if hub.running then vim:SendMouseButtonEvent(0, 0, 0, false, game, 0) end
+        if not done and fishButton and fishButton:IsA("GuiButton") then
+            local activated=pcall(function() fishButton:Activate() end)
+            done=activated
+            if not done then
+                pcall(function()
+                    local center=fishButton.AbsolutePosition+fishButton.AbsoluteSize/2
+                    local vim=game:GetService("VirtualInputManager")
+                    vim:SendMouseButtonEvent(center.X,center.Y,0,true,game,0)
+                    task.delay(0.015,function()
+                        pcall(function() vim:SendMouseButtonEvent(center.X,center.Y,0,false,game,0) end)
+                    end)
                 end)
-            end)
+            end
         end
     end
 end
@@ -4009,10 +4583,8 @@ local function trackInventory()
     end
     hub.trackedInventory=inv
     if inv then
-        lastBagSize=#inv:GetChildren()
         hub.inventoryConnection=track(inv.ChildAdded:Connect(function(child)
             if not hub.running then return end
-            catchesThisSession=catchesThisSession+1
             lastCatchAt=os.clock()
             if (state.protectMaterials and isCraftIngredient and isCraftIngredient(child))
                 or (flaggedRare(child) and state.autoLevel and state.protectRare) then
@@ -4040,21 +4612,25 @@ local function progressionTick()
     if now-lastAutoLevelTick<3 then return end
     lastAutoLevelTick=now
     local p=profile()
+    local unknownRod=unverifiedUpdateRod(p.rod)
+    if unknownRod then
+        progressionStatus="Paused: live Power for "..unknownRod.." is not exposed; scan live rod data"
+        hub.routeGate.ready=false
+        return
+    end
     if not p.data then
         progressionStatus="Waiting for replicated profile data"
         return
     end
     if state.autoCodes and p.data then redeemEligibleCodes(p.level) end
-    if p.level and p.level>=state.targetLevel
-        and not (state.autoQuests and state.autoSageAfterAmber
-            and (not ext.diamondOwned()) and ext.questTracker.sageRoute) then
+    local keepForSage=state.autoQuests and state.autoSageAfterAmber and not ext.diamondOwned()
+    if p.level and p.level>=state.targetLevel and not keepForSage then
         stopAutoLevel("GOAL HIT: Level "..p.level.."! Fishing stopped; Sell/Quests stay independent.")
         return
     end
     if p.level then
         if lastProfileLevel and p.level>lastProfileLevel then
             levelGained=levelGained+(p.level-lastProfileLevel)
-            levelGainAt=now
             lastCatchAt=now
         end
         lastProfileLevel=p.level
@@ -4090,7 +4666,6 @@ local function progressionTick()
         local prev=LEVEL_ROUTE[index-1].name
         notify("No catch/XP progress for 155s. Trying "..prev.." for 6 minutes.")
         lastCatchAt=now
-        lastAutoRoute=0
     elseif not override and index==1 and now-lastCatchAt>180 then
         progressionStatus="Stalled: check tutorial / rod / reel / inventory"
         if now-lastAutoHealthCheck>120 then
@@ -4149,10 +4724,15 @@ track(RunService.Heartbeat:Connect(function()
         and not sellTracker.pending and char and now - lastCast > math.max(0.4, state.castDelay)
         and now - lastFishingEnd > math.max(0.4, state.castDelay) then
         local p=profile()
+        local unknownRod=unverifiedUpdateRod(p.rod)
         local island=ext.activeFarmOverride() or routeChoice(p)
         local root=char:FindFirstChild("HumanoidRootPart")
         local shopPause,shopReason=hub.shopNeedsPause(p)
         if not root then
+            lastCast=now
+        elseif state.autoLevel and state.autoRoute and unknownRod then
+            progressionStatus="Casting paused: unknown live Power for "..unknownRod
+            hub.routeGate.ready=false
             lastCast=now
         elseif shopPause then
             hub.routeGate.status=shopReason or "Rod upgrade queued"
@@ -4276,6 +4856,7 @@ task.spawn(function()
             local _, active = minigame()
             local cf = cframeIsland(state.selectedIsland)
             if cf and root and not active and (root.Position - cf.Position).Magnitude > 70 then
+                hub.manualTravelUntil=now+3
                 teleportTo(cf, state.selectedIsland)
             end
         end
@@ -4338,7 +4919,7 @@ task.spawn(function()
             hub.ui.headerSubtitle.Text="FISHING  /  "..barGuard.status
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.gold
         else
-            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.7"
+            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.8.1"
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.muted
         end
         hub.ui.levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -4363,21 +4944,22 @@ task.spawn(function()
             .."\nNext fish: "..tostring(ext.craftTracker.fish or "--")
             .." | Craft attempts: "..ext.craftTracker.attempts
         local merchantActive=false
-        for _,name in ipairs({"Maoshan","Taoist"}) do
+        for _,name in ipairs({"Maoshan","Taoist","Halloween","Samba"}) do
             local available=ext.merchantTracker[name]~=nil
             hub.ui.merchantButtons[name].Visible=available and state.merchantAlerts
             merchantActive=merchantActive or available
         end
         hub.ui.roamingPopup.Visible=merchantActive and state.merchantAlerts
+        local nextRodLabel=suggested and (suggested.name.." ("..suggested.cost.." Cash"..(suggested.verifiedPrice and ", live)" or ", estimate; verify in shop)")) or "Complete"
         hub.ui.routeHUD.Text="ROUTE  /  "..hub.routeGate.status
             .."\n"..progressionStatus
             .."\nSHOP  /  "..rodShop.status
-            .."\nNEXT  /  "..(suggested and (suggested.name.." ("..suggested.cost.." Cash)") or "Complete")
+            .."\nNEXT  /  "..nextRodLabel
         task.wait(3)
     end
 end)
 
-report("KITKIT v2.7 ready. Click the small K icon or press K to open the menu.")
+report("KITKIT v2.8.1 ready. Click the small K icon or press K to open the menu.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
