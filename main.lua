@@ -1,7 +1,8 @@
 --[[
-KITKIT HUB v2.9.2 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.9.3 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
+v2.9.3: scope fixes, faster route verification, guarded fishing loops, and lower default cast delay.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
 Quest and crafting requests are subject to server verification and may fail.
 Rod buying uses game UI ONLY, targets one shop rod per island, and verifies ownership.
@@ -69,7 +70,7 @@ local state = {
     secretAlert = true, antiAFK = true, stayIsland = false,
     noclip = false, speedBoost = false,
     skillZ = true, skillX = true, skillC = true, skillV = true,
-    castDelay = 0.65, bossDelay = 20, sellDelay = 30,
+    castDelay = 0.4, bossDelay = 20, sellDelay = 30,
     speed = 24, bossMode = "Normal",
     selectedIsland = "Beginning Isle",
 }
@@ -90,6 +91,7 @@ local savedCFrame = nil
 local pendingSellUntil = 0
 local lastCast = 0
 local lastEquipAttempt = 0
+local equipRequestPending = false
 local lastReel = 0
 local reelRequests = 0
 local lastSkill = 0
@@ -99,10 +101,12 @@ local lastTP = 0
 local lastFishingEnd = 0
 -- Explicit travel gate: Autolevel never casts until it has verified the intended dock.
 -- Kept independent of the rod-shop and quest/craft route state machines.
-hub.routeGate = {ready=false, island=nil, status="Idle", lastAttempt=-math.huge,
+hub.routeGate = {ready=false, island=nil, targetIsland=nil, force=false, status="Idle", lastAttempt=-math.huge,
     lastTeleport=0, attempts=0, confirms=0, blockedCasts=0, lastBlockedLog=0}
 
 local lastAutoLevelTick = 0
+local lastRouteTick = 0
+local lastNoclipScan = 0
 local lastAutoHealthCheck = 0
 local lastCatchAt = os.clock()
 local lastProfileLevel = nil
@@ -183,6 +187,16 @@ local function notify(msg)
     pcall(function()
         StarterGui:SetCore("SendNotification", { Title = "KITKIT HUB", Text = tostring(msg), Duration = 5 })
     end)
+end
+local errorReportAt = {}
+local function reportError(label, err, interval)
+    local key = tostring(label)
+    local now = os.clock()
+    local previous = errorReportAt[key]
+    if not previous or now - previous >= (interval or 5) then
+        errorReportAt[key] = now
+        report(tostring(label) .. " error: " .. tostring(err))
+    end
 end
 local function setState(k, val)
     state[k] = val
@@ -372,9 +386,8 @@ local function minigame()
     return fg, (fg and fg:IsA("GuiObject") and fg.Visible == true) or false
 end
 -- Robust fishing-bar controller (v2.2).
--- The game can continuously tween this UI object. A single Heartbeat assignment
--- can be overwritten before the next rendered frame. Correct on changes and on
--- three frame phases, while doing nothing when the feature is switched off.
+-- The game can continuously tween this UI object. Use one RenderStepped correction
+-- loop plus a property-change listener; avoid duplicate Stepped/Heartbeat scans.
 local BAR_CENTER = UDim2.new(0.5, 0, 0.5, 0)
 local barGuard = {
     bar = nil, positionConnection = nil, changing = false,
@@ -496,12 +509,23 @@ end
 
 local function equipRod()
     local char = LocalPlayer.Character
-    if not char then return end
-    if char:GetAttribute("Type") == "Fishing Rod" then return end
-    if os.clock()-lastEquipAttempt<2.0 then return end
-    lastEquipAttempt=os.clock()
+    if not char then return false end
+    if char:GetAttribute("Type") == "Fishing Rod" then return true end
+    local now = os.clock()
+    if now - lastEquipAttempt < 0.85 then return false end
+    lastEquipAttempt = now
     local t = event("ToggleHotbar", "RemoteFunction")
-    if t then pcall(function() t:InvokeServer("1") end) end
+    if not t then return false end
+    return pcall(function() t:InvokeServer("1") end)
+end
+local function requestEquipRod()
+    if equipRequestPending or os.clock() - lastEquipAttempt < 0.85 then return end
+    equipRequestPending = true
+    task.spawn(function()
+        local ok, err = pcall(equipRod)
+        equipRequestPending = false
+        if not ok then reportError("Rod equip", err, 5) end
+    end)
 end
 -- Source verified: ReplicatedStorage.Data[tostring(UserId)].FishingRod,
 -- FishingRodInventory and ReplicatedStorage.Info.Inventory are used in StarCrow.
@@ -3116,16 +3140,19 @@ local function tpMerchant(kind)
     return teleportTo(part.CFrame*CFrame.new(0,0,-7),kind.." merchant")
 end
 
-return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, SKILL_SOURCE_CATALOG=SKILL_SOURCE_CATALOG, CHARACTER_UNLOCKS=CHARACTER_UNLOCKS, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, scanLiveRodData=scanLiveRodData, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, discoverLiveQuestModules=discoverLiveQuestModules, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
+return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, SKILL_SOURCE_CATALOG=SKILL_SOURCE_CATALOG, CHARACTER_UNLOCKS=CHARACTER_UNLOCKS, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, scanLiveRodData=scanLiveRodData, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, discoverLiveQuestModules=discoverLiveQuestModules, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick, fold=fold, currentWeather=currentWeather}
 end)()
 
 function hub.armAutoRoute()
     hub.routeGate.ready=false
     hub.routeGate.island=nil
+    hub.routeGate.targetIsland=nil
+    hub.routeGate.force=false
     hub.routeGate.status="Locating fishing island"
     hub.routeGate.lastAttempt=-math.huge
     hub.routeGate.lastTeleport=0
     lastAutoLevelTick=-math.huge -- first route evaluation must run before the first cast
+    lastRouteTick=-math.huge
 end
 function hub.dockDistance(root, cf)
     local p=root.Position
@@ -3220,7 +3247,7 @@ function hub.routeTravelTick(now,island,force)
         hub.routeGate.status="Landing at "..island
         return
     end
-    if state.autoSeaFacing and not faceSea(island,true) then
+    if state.autoSeaFacing and not faceSea(island,false) then
         hub.routeGate.ready=false
         hub.routeGate.status="Waiting for safe sea-facing angle"
         return
@@ -4920,7 +4947,7 @@ toggle(fishPage, "Auto cast", "autoCast", function(v)
     if v then setState("autoEnzo", false); setState("autoLong", false) end
 end)
 toggle(fishPage, "Auto reel + progression", "autoReel")
-toggle(fishPage, "Keep fishing bar centered (triple guard)", "lockBar")
+toggle(fishPage, "Keep fishing bar centered (live guard)", "lockBar")
 toggle(fishPage, "Use equipped skills", "autoSkill")
 toggle(fishPage, "Perfect slam (event)", "slam")
 toggle(fishPage, "Auto charge (event)", "charge")
@@ -5176,7 +5203,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.9.2 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.9.3 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "RouteDecision="..tostring(select(1,routeChoice(p)))
@@ -5195,7 +5222,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
         "FarmOverride="..tostring(select(1,ext.activeFarmOverride()))
             .." CraftRoute="..tostring(ext.craftTracker.route)
             .." CraftFish="..tostring(ext.craftTracker.fish)
-            .." Weather="..currentWeather()
+            .." Weather="..ext.currentWeather()
             .." SelectedQuests="..tostring(hub.questSelectedCount and hub.questSelectedCount() or 0)
             .." TrackedQuests="..tostring(hub.questTrackedCount and hub.questTrackedCount() or 0),
         "RouteGate="..hub.routeGate.status.." Island="..tostring(hub.routeGate.island)
@@ -5331,6 +5358,8 @@ return {
     merchantButtons = merchantButtons,
     roamingPopup = roamingPopup,
     routeHUD = routeHUD,
+    roadmapStatus = roadmapStatus,
+    merchantGuide = merchantGuide,
     levelBtn = levelBtn,
 }
 end
@@ -5504,6 +5533,8 @@ end
 local function stopAutoLevel(reason)
     state.autoLevel=false
     hub.routeGate.ready=false
+    hub.routeGate.targetIsland=nil
+    hub.routeGate.force=false
     hub.routeGate.status="Leveling stopped"
     for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
         setState(k,false)
@@ -5515,12 +5546,14 @@ end
 local function progressionTick()
     if not state.autoLevel then return end
     local now=os.clock()
-    if now-lastAutoLevelTick<3 then return end
+    if now-lastAutoLevelTick<1 then return end
     lastAutoLevelTick=now
     local p=profile()
-    if state.autoQuests and state.autoSageAfterAmber and questTracker.sageRoute=="Battlefield Isle" then
+    if state.autoQuests and state.autoSageAfterAmber and ext.questTracker.sageRoute=="Battlefield Isle" then
         progressionStatus="Sage NPC interaction at Battlefield; Auto Level route paused"
         hub.routeGate.ready=false
+        hub.routeGate.targetIsland=nil
+        hub.routeGate.force=false
         hub.routeGate.island=nil
         hub.routeGate.status="Quest NPC interaction (not a fishing dock)"
         return
@@ -5529,10 +5562,15 @@ local function progressionTick()
     if unknownRod then
         progressionStatus="Paused: live Power for "..unknownRod.." is not exposed; scan live rod data"
         hub.routeGate.ready=false
+        hub.routeGate.targetIsland=nil
+        hub.routeGate.force=false
         return
     end
     if not p.data then
         progressionStatus="Waiting for replicated profile data"
+        hub.routeGate.ready=false
+        hub.routeGate.targetIsland=nil
+        hub.routeGate.force=false
         return
     end
     if state.autoCodes and p.data then redeemEligibleCodes(p.level) end
@@ -5577,7 +5615,8 @@ local function progressionTick()
             progressionStatus="Farming "..desired.." (Power "..power..")"
         end
     end
-    hub.routeTravelTick(now,desired,override~=nil or (state.autoLevel and not state.stayIsland))
+    hub.routeGate.targetIsland=desired
+    hub.routeGate.force=(override~=nil or (state.autoLevel and not state.stayIsland))
     -- A dry spell is not proof that the rod is underpowered. Keep the island
     -- selected when its published Power gate is met; diagnose instead of
     -- silently demoting the player and trapping progression in the prior isle.
@@ -5598,33 +5637,60 @@ local function progressionTick()
     end
 end
 
--- Late render + simulation phases reduce the time a competing game tween
--- can move the indicator. A property-change listener handles mid-frame edits.
--- No server remotes are sent from these render callbacks.
+-- One late render-phase correction loop reduces competition with game tweens.
+-- A property-change listener handles mid-frame edits; no remotes run here.
 track(RunService.RenderStepped:Connect(function()
-    if hub.running then monitorFishingBar() end
-end))
-track(RunService.Stepped:Connect(function()
-    if hub.running then monitorFishingBar() end
+    if hub.running then
+        local ok, err = pcall(monitorFishingBar)
+        if not ok then reportError("Bar monitor", err, 10) end
+    end
 end))
 track(RunService.Heartbeat:Connect(function()
     if not hub.running then return end
+    local heartbeatOK, heartbeatError = pcall(function()
     local now = os.clock()
-    progressionTick()
+    if state.autoLevel then
+        local progressionOK, progressionError = pcall(progressionTick)
+        if not progressionOK then
+            hub.routeGate.ready = false
+            hub.routeGate.targetIsland = nil
+            hub.routeGate.force = false
+            progressionStatus = "Auto Level error: " .. tostring(progressionError)
+            reportError("Auto Level", progressionError, 5)
+        end
+        if hub.routeGate.targetIsland and now - lastRouteTick >= 0.25 then
+            lastRouteTick = now
+            local routeOK, routeError = pcall(hub.routeTravelTick, now,
+                hub.routeGate.targetIsland, hub.routeGate.force)
+            if not routeOK then
+                hub.routeGate.ready = false
+                hub.routeGate.status = "Route error; see diagnostics"
+                reportError("Route travel", routeError, 5)
+            end
+        end
+    end
     local fg, active = minigame()
     local char = LocalPlayer.Character
     if wasFishing and not active then lastFishingEnd = now end
     wasFishing = active
     local workingBoss = state.autoEnzo or state.autoLong
     if fg and active then
-        if state.lockBar or workingBoss then monitorFishingBar() end
         if (state.autoReel or workingBoss) and now - lastReel >= 0.085 then
             lastReel = now
             if fire("UpdateFishProgression") then reelRequests = reelRequests + 1 end
         end
-        if (state.autoSkill or workingBoss) and char then handleSkill(fg, char, now) end
-        if state.rhythm or workingBoss then handleRhythm(fg, now) end
-        if state.phase2 or workingBoss then phase2Click(fg, now) end
+        if (state.autoSkill or workingBoss) and char then
+            local ok, err = pcall(handleSkill, fg, char, now)
+            if not ok then reportError("Auto Skill", err, 10) end
+        end
+        if state.rhythm or workingBoss then
+            local ok, err = pcall(handleRhythm, fg, now)
+            if not ok then reportError("Rhythm", err, 10) end
+        end
+        if state.phase2 or workingBoss then
+            local ok, err = pcall(phase2Click, fg, now)
+            if not ok then reportError("Phase 2", err, 10) end
+        end
     elseif workingBoss then
         if now - lastBossTry > state.bossDelay then
             lastBossTry = now
@@ -5679,7 +5745,7 @@ track(RunService.Heartbeat:Connect(function()
             lastCast=now
         elseif char:GetAttribute("Type")~="Fishing Rod" then
             lastCast=now
-            task.spawn(equipRod)
+            requestEquipRod()
         elseif not char:GetAttribute("Fishing") then
             lastCast=now
             if fire("Fishing",root.CFrame) then
@@ -5713,7 +5779,8 @@ track(RunService.Heartbeat:Connect(function()
         end
         lastSpeed = now
     end
-    if state.noclip and char then
+    if state.noclip and char and now - lastNoclipScan >= 0.25 then
+        lastNoclipScan = now
         for _, part in ipairs(char:GetDescendants()) do
             if part:IsA("BasePart") and part.CanCollide then
                 if hub.touched[part] == nil then hub.touched[part] = part.CanCollide end
@@ -5721,6 +5788,8 @@ track(RunService.Heartbeat:Connect(function()
             end
         end
     end
+    end)
+    if not heartbeatOK then reportError("Heartbeat", heartbeatError, 5) end
 end))
 
 local slamEv = event("Slam")
@@ -5765,6 +5834,7 @@ end))
 
 task.spawn(function()
     while hub.running do
+        local workerOK, workerError = pcall(function()
         local now = os.clock()
         checkSellResult()
         if state.autoSell and now>=(hub.manualTravelUntil or 0) and not isShopping() then buyerTick() end
@@ -5795,6 +5865,8 @@ task.spawn(function()
                 teleportTo(cf, state.selectedIsland)
             end
         end
+        end)
+        if not workerOK then reportError("Sell / buyer worker", workerError, 5) end
         task.wait(1)
     end
 end)
@@ -5830,6 +5902,7 @@ end)
 
 task.spawn(function()
     while hub.running do
+        local updateOK, updateError = pcall(function()
         local b = scanBosses()
         local _, count, cap = getInventory()
         local weather = tostring(workspace:GetAttribute("Weather") or "Unknown")
@@ -5842,14 +5915,14 @@ task.spawn(function()
         hub.ui.statusTop.Text="Lv "..tostring(p.level or "?").."  /  Bag "..tostring(count or "?").."/"..tostring(cap or "?")
             .."  /  "..weather
         hub.ui.weatherLabel.Text="Current weather: "..weather
-        if roadmapStatus and roadmapStatus.Parent then
+        if hub.ui.roadmapStatus and hub.ui.roadmapStatus.Parent then
             local target=nextRodSuggestion(p)
             local _,nextIsland,required=hub.nextIslandGoal(p)
             local skillFolder=p.data and p.data:FindFirstChild("Skill")
             local hasSkyInfinity=false
             if skillFolder then
                 for _,item in ipairs(skillFolder:GetDescendants()) do
-                    local n=fold(item.Name)
+                    local n=ext.fold(item.Name)
                     if n=="infiniteskyascension" or n=="skyinfinityascension" then hasSkyInfinity=true;break end
                 end
             end
@@ -5872,10 +5945,10 @@ task.spawn(function()
                 "AFTER MERCHANT: evolve Apex Eagle Hunt to Pure Yang Cast; collect Sage / Duan Gan skill prerequisites.",
                 "CHARACTERS: Ba Chang, Biao Di, Biao Ge, Chu Xin, Duan Gan, Xiao Daoshi, Da Shixiong, Yaxuo, Shi Xing Diao, Louya Zhi Wang.",
                 "MERCHANT: "..tostring(ext.merchantTracker.announcedKind or "none announced").." | "..tostring(ext.merchantTracker.island or "island unknown")}
-            roadmapStatus.Text=table.concat(lines,"\n")
+            hub.ui.roadmapStatus.Text=table.concat(lines,"\n")
             local remaining=ext.merchantTracker.expiresAt and math.max(0,math.floor(ext.merchantTracker.expiresAt-os.clock())) or nil
             local nextSpawn=ext.merchantTracker.nextSpawnAt and math.max(0,math.floor(ext.merchantTracker.nextSpawnAt-os.clock())) or nil
-            merchantGuide.Text="Roaming merchant: 50/50 Taoist or Maoshan. Reported cycle: every 30 min, visible for 10 min.\nTaoist guide: Rod 100M / Apex Eagle Hunt 300M / Orb 100M. Maoshan guide: Rod 300M / River Suppression 200M / Orb 200M. These are Discord-guide prices, not verified live prices.\nLast announcement: "..tostring(ext.merchantTracker.announcement).."\nDetected: Taoist "..(ext.merchantTracker.Taoist and "YES" or "no").." / Maoshan "..(ext.merchantTracker.Maoshan and "YES" or "no")..(remaining and ("\nReported window remaining: "..remaining.."s") or "")
+            hub.ui.merchantGuide.Text="Roaming merchant: 50/50 Taoist or Maoshan. Reported cycle: every 30 min, visible for 10 min.\nTaoist guide: Rod 100M / Apex Eagle Hunt 300M / Orb 100M. Maoshan guide: Rod 300M / River Suppression 200M / Orb 200M. These are Discord-guide prices, not verified live prices.\nLast announcement: "..tostring(ext.merchantTracker.announcement).."\nDetected: Taoist "..(ext.merchantTracker.Taoist and "YES" or "no").." / Maoshan "..(ext.merchantTracker.Maoshan and "YES" or "no")..(remaining and ("\nReported window remaining: "..remaining.."s") or "")
                 ..(nextSpawn and ("\nNext reported spawn estimate: "..nextSpawn.."s") or "")
         end
         hub.ui.statusBottom.Text=lastAction
@@ -5890,7 +5963,7 @@ task.spawn(function()
             hub.ui.headerSubtitle.Text="FISHING  /  "..barGuard.status
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.gold
         else
-            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.2"
+            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.3"
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.muted
         end
         hub.ui.levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -5911,7 +5984,7 @@ task.spawn(function()
         end
         hub.ui.craftHUD.Text=state.craftTarget.." ["..gathered.."/"..needed.."] "
             ..(state.autoFarmMaterials and "FARM ON" or "FARM OFF")
-            .." | Weather "..currentWeather().."\n"..ext.craftTracker.status
+            .." | Weather "..ext.currentWeather().."\n"..ext.craftTracker.status
             .."\nNext fish: "..tostring(ext.craftTracker.fish or "--")
             .." | Craft attempts: "..ext.craftTracker.attempts
         local merchantActive=false
@@ -5936,11 +6009,13 @@ task.spawn(function()
             .."\n"..targetSummary
             .."\nSHOP  /  "..rodShop.status
             .."\n"..progressionStatus
+        end)
+        if not updateOK then reportError("HUD refresh", updateError, 5) end
         task.wait(3)
     end
 end)
 
-report("KITKIT v2.9.2 ready. Progression roadmap and roaming merchant detection enabled. Route progression no longer demotes on dry spells; next rod gates are explicit.")
+report("KITKIT v2.9.3 ready. Progression roadmap and roaming merchant detection enabled. Route progression no longer demotes on dry spells; next rod gates are explicit.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
