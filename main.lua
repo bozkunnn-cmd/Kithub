@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.6 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.7 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
@@ -2221,6 +2221,7 @@ function hub.routeTravelTick(now,island)
     hub.routeGate.status="Ready at "..island
 end
 
+local function buildInterface()
 -- GUI creation. Built with Roblox instances; no remote UI code.
 local container = PlayerGui
 pcall(function()
@@ -2231,17 +2232,25 @@ local GUI = Instance.new("ScreenGui")
 GUI.Name = "KITKIT_HeavyweightFishing_GUI"
 GUI.ResetOnSpawn = false
 GUI.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+GUI.DisplayOrder = 1000
 GUI.IgnoreGuiInset = true
 local parented = pcall(function() GUI.Parent = container end)
 if not parented then GUI.Parent = PlayerGui end
 hub.gui = GUI
 
 local colors = {
-    bg = Color3.fromRGB(15, 18, 24), panel = Color3.fromRGB(21, 25, 32),
-    row = Color3.fromRGB(29, 33, 41), outline = Color3.fromRGB(65, 73, 84),
-    accent = Color3.fromRGB(165, 209, 200), gold = Color3.fromRGB(177, 169, 147),
-    white = Color3.fromRGB(226, 231, 235), muted = Color3.fromRGB(143, 153, 166),
-    red = Color3.fromRGB(182, 103, 105),
+    bg = Color3.fromRGB(16, 28, 42),          -- #101C2A
+    panel = Color3.fromRGB(22, 36, 54),       -- #162436
+    row = Color3.fromRGB(32, 51, 74),         -- #20334A
+    rowHover = Color3.fromRGB(42, 65, 88),
+    outline = Color3.fromRGB(57, 79, 101),
+    accent = Color3.fromRGB(66, 214, 195),    -- #42D6C3
+    accentSoft = Color3.fromRGB(29, 78, 80),
+    gold = Color3.fromRGB(231, 181, 103),     -- #E7B567
+    white = Color3.fromRGB(242, 245, 248),    -- #F2F5F8
+    muted = Color3.fromRGB(178, 193, 208),
+    red = Color3.fromRGB(228, 125, 131),      -- #E47D83
+    green = Color3.fromRGB(109, 205, 155),
 }
 local function make(class, parent, props)
     local obj = Instance.new(class)
@@ -2249,79 +2258,195 @@ local function make(class, parent, props)
     obj.Parent = parent
     return obj
 end
-local function round(o, px) make("UICorner", o, { CornerRadius = UDim.new(0, px or 9) }) end
-local function edge(o, color)
-    make("UIStroke", o, { Color = color or colors.outline, Thickness = 1, Transparency = 0.28 })
+local function round(o, px)
+    make("UICorner", o, { CornerRadius = UDim.new(0, px or 9) })
 end
+local function edge(o, color, transparency)
+    make("UIStroke", o, {
+        Color = color or colors.outline,
+        Thickness = 1,
+        Transparency = transparency == nil and 0.38 or transparency,
+    })
+end
+
 local compact = UIS.TouchEnabled and not UIS.KeyboardEnabled
-local width = compact and 310 or 344
-local height = compact and 356 or 386
+local camera = workspace.CurrentCamera
+local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+local width, height
+if compact then
+    width = math.max(300, math.min(620, viewport.X - 24))
+    height = math.max(420, math.min(720, viewport.Y - 48))
+else
+    width = math.max(520, math.min(680, viewport.X - 80))
+    height = math.max(500, math.min(680, viewport.Y - 80))
+end
+local headerHeight = 62
+local footerHeight = 38
+local sidebarWidth = compact and 112 or 136
+
 local main = make("Frame", GUI, {
-    Name = "Window", BackgroundColor3 = colors.bg, BorderSizePixel = 0,
-    Size = UDim2.fromOffset(width, height), Position = UDim2.fromOffset(60, 81),
-    ClipsDescendants = true, Active = true, Visible = false,
+    Name = "Window",
+    BackgroundColor3 = colors.bg,
+    BorderSizePixel = 0,
+    Size = UDim2.fromOffset(width, height),
+    Position = UDim2.new(0.5, -width / 2, 0.5, -height / 2),
+    ClipsDescendants = true,
+    Active = true,
+    Visible = false,
 })
-round(main, 10); edge(main)
+round(main, 14)
+edge(main, colors.outline, 0.18)
+
 local header = make("Frame", main, {
-    BackgroundColor3 = colors.panel, Size = UDim2.new(1, 0, 0, 46),
-    BorderSizePixel = 0, Active = true,
+    Name = "Header",
+    BackgroundColor3 = colors.panel,
+    Size = UDim2.new(1, 0, 0, headerHeight),
+    BorderSizePixel = 0,
+    Active = true,
+})
+local brandMark = make("Frame", header, {
+    BackgroundColor3 = colors.accentSoft,
+    BorderSizePixel = 0,
+    Size = UDim2.fromOffset(38, 38),
+    Position = UDim2.fromOffset(14, 12),
+})
+round(brandMark, 11)
+local brandLetter = make("TextLabel", brandMark, {
+    BackgroundTransparency = 1,
+    Text = "K",
+    Font = Enum.Font.GothamBold,
+    TextSize = 21,
+    TextColor3 = colors.accent,
+    Size = UDim2.fromScale(1, 1),
 })
 local title = make("TextLabel", header, {
-    BackgroundTransparency = 1, Text = "KITKIT", TextXAlignment = Enum.TextXAlignment.Left,
-    Font = Enum.Font.GothamBold, TextSize = 14, TextColor3 = colors.white,
-    Position = UDim2.fromOffset(12, 5), Size = UDim2.new(1, -58, 0, 21),
+    BackgroundTransparency = 1,
+    Text = "KITKIT / HEAVYWEIGHT",
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Font = Enum.Font.GothamBold,
+    TextSize = compact and 15 or 17,
+    TextColor3 = colors.white,
+    Position = UDim2.fromOffset(62, 9),
+    Size = UDim2.new(1, -150, 0, 24),
 })
 local headerSubtitle = make("TextLabel", header, {
-    BackgroundTransparency = 1, Text = "HEAVYWEIGHT  /  2.6", TextXAlignment = Enum.TextXAlignment.Left,
-    Font = Enum.Font.GothamMedium, TextSize = 9, TextColor3 = colors.muted,
-    Position = UDim2.fromOffset(12, 26), Size = UDim2.new(1, -58, 0, 13),
+    BackgroundTransparency = 1,
+    Text = "FISHING AUTOMATION  /  2.7",
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Font = Enum.Font.GothamMedium,
+    TextSize = 11,
+    TextColor3 = colors.muted,
+    Position = UDim2.fromOffset(63, 34),
+    Size = UDim2.new(1, -150, 0, 16),
 })
 local closeButton = make("TextButton", header, {
-    Text = "x", Font = Enum.Font.GothamMedium, TextSize = 14, TextColor3 = colors.muted,
-    BackgroundColor3 = colors.panel, Size = UDim2.fromOffset(27, 27),
-    Position = UDim2.new(1, -38, 0, 9), BorderSizePixel = 0,
+    Text = "X",
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    TextColor3 = colors.white,
+    BackgroundColor3 = colors.row,
+    Size = UDim2.fromOffset(34, 34),
+    Position = UDim2.new(1, -48, 0, 14),
+    BorderSizePixel = 0,
+    AutoButtonColor = false,
 })
-round(closeButton, 6)
-local tabBar = make("ScrollingFrame", main, {
-    BackgroundTransparency = 1, BorderSizePixel=0,
-    Size = UDim2.new(1, -16, 0, 33), Position = UDim2.fromOffset(8, 50),
-    ScrollBarThickness = 1, ScrollingDirection=Enum.ScrollingDirection.X,
-    AutomaticCanvasSize=Enum.AutomaticSize.X, CanvasSize=UDim2.new(),
+round(closeButton, 9)
+track(closeButton.MouseEnter:Connect(function() closeButton.BackgroundColor3 = colors.red end))
+track(closeButton.MouseLeave:Connect(function() closeButton.BackgroundColor3 = colors.row end))
+
+local sidebar = make("Frame", main, {
+    Name = "Sidebar",
+    BackgroundColor3 = colors.panel,
+    BorderSizePixel = 0,
+    Position = UDim2.fromOffset(0, headerHeight),
+    Size = UDim2.new(0, sidebarWidth, 1, -headerHeight - footerHeight),
 })
-local tabList = make("UIListLayout", tabBar, {
-    FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Left,
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 3),
+make("TextLabel", sidebar, {
+    BackgroundTransparency = 1,
+    Text = "WORKSPACE",
+    TextColor3 = colors.muted,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Position = UDim2.fromOffset(14, 12),
+    Size = UDim2.new(1, -24, 0, 18),
+})
+local navList = make("Frame", sidebar, {
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(7, 38),
+    Size = UDim2.new(1, -14, 1, -46),
+})
+make("UIListLayout", navList, {
+    FillDirection = Enum.FillDirection.Vertical,
+    HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 6),
+})
+
+make("Frame", main, {
+    Name = "SidebarDivider",
+    BackgroundColor3 = colors.outline,
+    BackgroundTransparency = 0.48,
+    BorderSizePixel = 0,
+    Position = UDim2.new(0, sidebarWidth, 0, headerHeight),
+    Size = UDim2.new(0, 1, 1, -headerHeight - footerHeight),
 })
 local content = make("Frame", main, {
-    BackgroundTransparency = 1, Position = UDim2.fromOffset(8, 89),
-    Size = UDim2.new(1, -16, 1, -135),
+    Name = "Content",
+    BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(sidebarWidth + 12, headerHeight + 10),
+    Size = UDim2.new(1, -sidebarWidth - 22, 1, -headerHeight - footerHeight - 18),
 })
 local footer = make("Frame", main, {
-    BackgroundColor3 = colors.panel, Position = UDim2.new(0, 0, 1, -42),
-    Size = UDim2.new(1, 0, 0, 42), BorderSizePixel = 0,
-})
-local statusTop = make("TextLabel", footer, {
-    BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
-    Text = "Weather: -- | Bag: -- | Boss: --", TextColor3 = colors.accent,
-    TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
-    Position = UDim2.fromOffset(11, 3), Size = UDim2.new(1, -22, 0, 17),
-})
-local statusBottom = make("TextLabel", footer, {
-    BackgroundTransparency = 1, Font = Enum.Font.Gotham,
-    Text = "Ready", TextColor3 = colors.muted, TextWrapped = true,
-    TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left,
-    Position = UDim2.fromOffset(11, 20), Size = UDim2.new(1, -22, 0, 18),
-})
-local bubble = make("TextButton", GUI, {
-    Name = "KLauncher", Text = "K", Font = Enum.Font.GothamBold, TextSize = 15,
-    BackgroundColor3 = colors.panel, TextColor3 = colors.white, AutoButtonColor = false,
-    Size = UDim2.fromOffset(32, 32), Position = UDim2.fromOffset(16, 85), Visible = true,
+    BackgroundColor3 = colors.panel,
+    Position = UDim2.new(0, 0, 1, -footerHeight),
+    Size = UDim2.new(1, 0, 0, footerHeight),
     BorderSizePixel = 0,
 })
-round(bubble, 9); edge(bubble, colors.outline)
-hub.bubbleDot=make("Frame", bubble, {
-    BorderSizePixel=0, BackgroundColor3=colors.muted,
-    Size=UDim2.fromOffset(5,5), Position=UDim2.new(1,-8,0,4),
+local statusTop = make("TextLabel", footer, {
+    BackgroundTransparency = 1,
+    Font = Enum.Font.GothamMedium,
+    Text = "Level --  /  Bag --  /  Weather --",
+    TextColor3 = colors.accent,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Position = UDim2.fromOffset(14, 3),
+    Size = UDim2.new(1, -28, 0, 15),
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+local statusBottom = make("TextLabel", footer, {
+    BackgroundTransparency = 1,
+    Font = Enum.Font.Gotham,
+    Text = "Ready",
+    TextColor3 = colors.muted,
+    TextWrapped = false,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Position = UDim2.fromOffset(14, 19),
+    Size = UDim2.new(1, -28, 0, 15),
+    TextTruncate = Enum.TextTruncate.AtEnd,
+})
+
+local bubble = make("TextButton", GUI, {
+    Name = "KLauncher",
+    Text = "K",
+    Font = Enum.Font.GothamBold,
+    TextSize = 17,
+    BackgroundColor3 = colors.panel,
+    TextColor3 = colors.accent,
+    AutoButtonColor = false,
+    Size = UDim2.fromOffset(36, 36),
+    Position = UDim2.fromOffset(18, 88),
+    Visible = true,
+    BorderSizePixel = 0,
+})
+round(bubble, 11)
+edge(bubble, colors.accent, 0.3)
+hub.bubbleDot = make("Frame", bubble, {
+    BorderSizePixel = 0,
+    BackgroundColor3 = colors.muted,
+    Size = UDim2.fromOffset(6, 6),
+    Position = UDim2.new(1, -9, 0, 5),
 })
 round(hub.bubbleDot, 5)
 
@@ -2357,40 +2482,96 @@ end))
 
 local pages = {}
 local tabs = {}
-local activeTab = "Fish"
+local activeTab = "Level"
+local navGlyphs = {
+    Level = "LV", Fish = "FI", Quests = "QU", Craft = "CR",
+    World = "WO", Boss = "BO", Other = "ST",
+}
 local function activate(name)
     activeTab = name
-    for tabName, page in pairs(pages) do page.Visible = tabName == name end
-    for tabName, btn in pairs(tabs) do
-        btn.BackgroundColor3 = tabName == name and colors.row or colors.panel
-        btn.TextColor3 = tabName == name and colors.white or colors.muted
+    for tabName, page in pairs(pages) do
+        page.Visible = tabName == name
+    end
+    for tabName, item in pairs(tabs) do
+        local selected = tabName == name
+        item.button.BackgroundColor3 = selected and colors.row or colors.panel
+        item.label.TextColor3 = selected and colors.white or colors.muted
+        item.glyph.BackgroundColor3 = selected and colors.accentSoft or colors.row
+        item.glyph.TextColor3 = selected and colors.accent or colors.muted
+        item.mark.Visible = selected
     end
 end
 local function createTab(name)
-    local btn = make("TextButton", tabBar, {
-        BackgroundColor3 = colors.panel, TextColor3 = colors.muted,
-        Text = name, TextSize = 10, Font = Enum.Font.GothamMedium,
-        Size = UDim2.fromOffset((#name>5 and 63 or 48),28), BorderSizePixel = 0,
+    local btn = make("TextButton", navList, {
+        BackgroundColor3 = colors.panel,
+        Text = "",
+        AutoButtonColor = false,
+        Size = UDim2.new(1, 0, 0, compact and 42 or 46),
+        BorderSizePixel = 0,
     })
-    round(btn, 5)
-    tabs[name] = btn
-    track(btn.MouseButton1Click:Connect(function() activate(name) end))
+    round(btn, 9)
+    local mark = make("Frame", btn, {
+        BackgroundColor3 = colors.accent,
+        BorderSizePixel = 0,
+        Size = UDim2.new(0, 3, 1, -14),
+        Position = UDim2.fromOffset(0, 7),
+        Visible = false,
+    })
+    round(mark, 3)
+    local glyph = make("TextLabel", btn, {
+        BackgroundColor3 = colors.row,
+        Text = navGlyphs[name] or "--",
+        TextColor3 = colors.muted,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        Position = UDim2.fromOffset(7, 7),
+        Size = UDim2.fromOffset(compact and 28 or 32, compact and 28 or 32),
+    })
+    round(glyph, 8)
+    local label = make("TextLabel", btn, {
+        BackgroundTransparency = 1,
+        Text = name,
+        TextColor3 = colors.muted,
+        Font = Enum.Font.GothamMedium,
+        TextSize = compact and 11 or 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Position = UDim2.fromOffset(compact and 42 or 47, 0),
+        Size = UDim2.new(1, compact and -47 or -52, 1, 0),
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+    tabs[name] = {button=btn, glyph=glyph, label=label, mark=mark}
+    track(btn.MouseEnter:Connect(function()
+        if activeTab ~= name then btn.BackgroundColor3 = colors.rowHover end
+    end))
+    track(btn.MouseLeave:Connect(function()
+        if activeTab ~= name then btn.BackgroundColor3 = colors.panel end
+    end))
+    track(btn.MouseButton1Click:Connect(function()
+        activate(name)
+    end))
     local scroll = make("ScrollingFrame", content, {
-        BackgroundTransparency = 1, Visible = false, BorderSizePixel = 0,
-        ScrollBarThickness = 3, ScrollBarImageColor3 = colors.accent,
-        Size = UDim2.fromScale(1, 1), CanvasSize = UDim2.new(),
+        BackgroundTransparency = 1,
+        Visible = false,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = colors.accent,
+        Size = UDim2.fromScale(1, 1),
+        CanvasSize = UDim2.new(),
         ScrollingDirection = Enum.ScrollingDirection.Y,
         AutomaticCanvasSize = Enum.AutomaticSize.None,
     })
     local layout = make("UIListLayout", scroll, {
-        Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 9),
+        SortOrder = Enum.SortOrder.LayoutOrder,
     })
     make("UIPadding", scroll, {
-        PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 6),
-        PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 5),
+        PaddingLeft = UDim.new(0, 3),
+        PaddingRight = UDim.new(0, 8),
+        PaddingTop = UDim.new(0, 4),
+        PaddingBottom = UDim.new(0, 8),
     })
     track(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        scroll.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 12)
+        scroll.CanvasSize = UDim2.fromOffset(0, layout.AbsoluteContentSize.Y + 16)
     end))
     pages[name] = scroll
     return scroll
@@ -2404,29 +2585,62 @@ local bossPage = createTab("Boss")
 local extraPage = createTab("Other")
 
 local function section(parent, name)
-    make("TextLabel", parent, {
-        BackgroundTransparency = 1, Text = name:upper(), TextXAlignment = Enum.TextXAlignment.Left,
-        Font = Enum.Font.GothamMedium, TextSize = 9, TextColor3 = colors.muted,
-        Size = UDim2.new(1, -4, 0, 19),
+    local holder = make("Frame", parent, {
+        BackgroundTransparency = 1,
+        Size = UDim2.new(1, -4, 0, 29),
     })
+    make("TextLabel", holder, {
+        BackgroundTransparency = 1,
+        Text = name,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Font = Enum.Font.GothamBold,
+        TextSize = compact and 13 or 14,
+        TextColor3 = colors.white,
+        Size = UDim2.new(1, 0, 1, -5),
+    })
+    make("Frame", holder, {
+        BackgroundColor3 = colors.outline,
+        BackgroundTransparency = 0.48,
+        BorderSizePixel = 0,
+        Position = UDim2.new(0, 0, 1, -2),
+        Size = UDim2.new(1, 0, 0, 1),
+    })
+    return holder
 end
 local function rowBase(parent, h)
     local row = make("Frame", parent, {
-        BackgroundColor3 = colors.panel, BorderSizePixel = 0,
-        Size = UDim2.new(1, -4, 0, h or 32),
+        BackgroundColor3 = colors.panel,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, -4, 0, h or 44),
     })
-    round(row, 5)
+    round(row, 9)
+    edge(row, colors.outline, 0.72)
     return row
 end
 local function action(parent, label, fn, important)
     local btn = make("TextButton", parent, {
-        Text = label, TextColor3 = important and colors.accent or colors.white,
-        BackgroundColor3 = important and colors.row or colors.panel,
-        Font = Enum.Font.GothamMedium, TextSize = 10,
-        Size = UDim2.new(1, -4, 0, 31), TextWrapped = true, BorderSizePixel = 0,
+        Text = label,
+        TextColor3 = important and colors.bg or colors.white,
+        BackgroundColor3 = important and colors.accent or colors.row,
+        Font = Enum.Font.GothamSemibold,
+        TextSize = compact and 11 or 12,
+        Size = UDim2.new(1, -4, 0, 42),
+        TextWrapped = true,
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
     })
-    round(btn, 5)
-    if important then edge(btn, colors.outline) end
+    round(btn, 9)
+    if important then
+        edge(btn, colors.accent, 0.48)
+    else
+        edge(btn, colors.outline, 0.78)
+    end
+    track(btn.MouseEnter:Connect(function()
+        if not important then btn.BackgroundColor3 = colors.rowHover end
+    end))
+    track(btn.MouseLeave:Connect(function()
+        if not important then btn.BackgroundColor3 = colors.row end
+    end))
     track(btn.MouseButton1Click:Connect(function()
         if not hub.running then return end
         local ok, err = pcall(fn, btn)
@@ -2435,18 +2649,27 @@ local function action(parent, label, fn, important)
     return btn
 end
 local function toggle(parent, label, key, onChange)
-    local row = rowBase(parent, 32)
+    local row = rowBase(parent, 46)
     make("TextLabel", row, {
-        Text = label, BackgroundTransparency = 1, TextXAlignment = Enum.TextXAlignment.Left,
-        TextColor3 = colors.white, Font = Enum.Font.GothamMedium, TextSize = 10,
+        Text = label,
+        BackgroundTransparency = 1,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = colors.white,
+        Font = Enum.Font.GothamMedium,
+        TextSize = compact and 11 or 12,
         TextTruncate = Enum.TextTruncate.AtEnd,
-        Size = UDim2.new(1, -66, 1, 0), Position = UDim2.fromOffset(8, 0),
+        Size = UDim2.new(1, -88, 1, 0),
+        Position = UDim2.fromOffset(13, 0),
     })
     local btn = make("TextButton", row, {
-        Size = UDim2.fromOffset(44, 21), Position = UDim2.new(1, -51, 0.5, -10),
-        TextSize = 9, Font = Enum.Font.GothamMedium, BorderSizePixel = 0,
+        Size = UDim2.fromOffset(58, 27),
+        Position = UDim2.new(1, -72, 0.5, -13),
+        TextSize = 10,
+        Font = Enum.Font.GothamBold,
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
     })
-    round(btn, 10)
+    round(btn, 8)
     local function refresh()
         btn.Text = state[key] and "ON" or "OFF"
         btn.TextColor3 = state[key] and colors.bg or colors.muted
@@ -2460,25 +2683,25 @@ local function toggle(parent, label, key, onChange)
     end))
 end
 local function stepper(parent, label, key, minVal, maxVal, jump, suffix)
-    local row = rowBase(parent, 36)
+    local row = rowBase(parent, 46)
     make("TextLabel", row, {
         Text = label, BackgroundTransparency = 1, TextXAlignment = Enum.TextXAlignment.Left,
-        TextColor3 = colors.white, Font = Enum.Font.GothamMedium, TextSize = 10,
-        Size = UDim2.new(1, -144, 1, 0), Position = UDim2.fromOffset(10, 0),
+        TextColor3 = colors.white, Font = Enum.Font.GothamMedium, TextSize = compact and 11 or 12,
+        Size = UDim2.new(1, -150, 1, 0), Position = UDim2.fromOffset(13, 0),
     })
     local minus = make("TextButton", row, {
-        Text = "-", Size = UDim2.fromOffset(28, 27), Position = UDim2.new(1, -133, 0.5, -13),
-        TextColor3 = colors.white, BackgroundColor3 = colors.panel, Font = Enum.Font.GothamBold, TextSize = 16,
+        Text = "-", Size = UDim2.fromOffset(30, 30), Position = UDim2.new(1, -138, 0.5, -15),
+        TextColor3 = colors.white, BackgroundColor3 = colors.row, Font = Enum.Font.GothamBold, TextSize = 17,
     })
     round(minus, 6)
     local number = make("TextLabel", row, {
         BackgroundTransparency = 1, TextColor3 = colors.accent,
-        Font = Enum.Font.GothamBold, TextSize = 11, Position = UDim2.new(1, -103, 0, 0),
-        Size = UDim2.fromOffset(66, 36),
+        Font = Enum.Font.GothamBold, TextSize = 13, Position = UDim2.new(1, -106, 0, 0),
+        Size = UDim2.fromOffset(62, 46),
     })
     local plus = make("TextButton", row, {
-        Text = "+", Size = UDim2.fromOffset(28, 27), Position = UDim2.new(1, -33, 0.5, -13),
-        TextColor3 = colors.white, BackgroundColor3 = colors.panel, Font = Enum.Font.GothamBold, TextSize = 16,
+        Text = "+", Size = UDim2.fromOffset(30, 30), Position = UDim2.new(1, -34, 0.5, -15),
+        TextColor3 = colors.white, BackgroundColor3 = colors.row, Font = Enum.Font.GothamBold, TextSize = 17,
     })
     round(plus, 6)
     local function refresh()
@@ -2499,16 +2722,16 @@ end
 -- No direct XP modification, no unattended buying/summoning.
 local levelingHUD=make("TextLabel",levelPage,{
     BackgroundColor3=colors.panel,TextColor3=colors.accent,
-    Font=Enum.Font.GothamBold,TextSize=compact and 11 or 13,
+    Font=Enum.Font.GothamBold,TextSize=compact and 12 or 14,
     Text="Level --  /  Rod --",TextWrapped=true,
     TextXAlignment=Enum.TextXAlignment.Left,
-    Size=UDim2.new(1,-4,0,44),
+    Size=UDim2.new(1,-4,0,56),
 })
-round(levelingHUD,8)
+round(levelingHUD,9);edge(levelingHUD,colors.outline,0.72)
 local routeHUD=make("TextLabel",levelPage,{
     BackgroundTransparency=1,TextColor3=colors.muted,
     TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
-    Font=Enum.Font.Gotham,TextSize=11,TextWrapped=true,
+    Font=Enum.Font.Gotham,TextSize=compact and 11 or 12,TextWrapped=true,
     Text="Route: idle\nNext upgrade: --",Size=UDim2.new(1,-4,0,105),
 })
 section(levelPage,"Fresh account: XP / cash farming")
@@ -2624,314 +2847,589 @@ action(levelPage,"RECHECK LEVEL/ROD NOW",function()
     notify("Level "..tostring(p.level or "?").."; Rod "..tostring(p.rod).."; Power "..tostring(pow or "?").."; Cash "..tostring(p.cash or "?"))
 end)
 
--- Quest selection board: multi-select only enables handlers that are implemented.
--- Other catalog entries remain visible as TRACK ONLY until live dialogue is verified.
+-- Quest selection board: a searchable multi-select modal, separate from Auto Level.
+-- Only catalog entries with a verified handler can be enabled; all others remain INFO.
 local function buildQuestUI()
-section(questPage,"Quest automation / selected questlines")
-hub.questHUD=make("TextLabel",questPage,{
-    BackgroundColor3=colors.panel,TextColor3=colors.accent,
-    Font=Enum.Font.Gotham,TextSize=compact and 10 or 11,
-    Text="Quest engine OFF",TextWrapped=true,
-    TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
-    Size=UDim2.new(1,-4,0,74),
-})
-round(hub.questHUD,7)
-toggle(questPage,"AUTO QUESTS (master, separate)","autoQuests",function(v)
-    notify(v and "Quest selector enabled; only selected supported handlers will run." or "Quest engine OFF")
-end)
+    section(questPage, "Quest automation")
+    hub.questHUD = make("TextLabel", questPage, {
+        BackgroundColor3 = colors.panel,
+        TextColor3 = colors.accent,
+        Font = Enum.Font.GothamMedium,
+        TextSize = compact and 11 or 12,
+        Text = "Quest engine OFF",
+        TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        Size = UDim2.new(1, -4, 0, 82),
+        Position = UDim2.new(),
+    })
+    round(hub.questHUD, 9)
+    edge(hub.questHUD, colors.outline, 0.72)
+    toggle(questPage, "Auto quest engine", "autoQuests", function(v)
+        notify(v and "Quest engine ON. Only selected supported handlers will run." or "Quest engine OFF")
+    end)
 
-local QUEST_FILTERS={"All rewards","Rods","Skills","Orbs","Tickets","Seasonal","Daily / Other"}
-local questFilter="All rewards"
-local liveQuestEntries={}
-local questFilterMenuOpen=false
-local questPickerOpen=false
-local function questFilterMatches(entry)
-    if questFilter=="All rewards" then return true end
-    local kind=tostring(entry.rewardType or "Unknown")
-    if questFilter=="Rods" then return kind=="Rod" or kind=="Rod Skin" end
-    if questFilter=="Skills" then return kind=="Skill" end
-    if questFilter=="Orbs" then return kind=="Orb" end
-    if questFilter=="Tickets" then return kind=="Ticket" end
-    if questFilter=="Seasonal" then return kind=="Seasonal" or kind=="Rod Skin" end
-    return kind=="Daily" or kind=="Other" or kind=="Unknown"
-end
-hub.questSelectedCount=function()
-    local count=0
-    for _,entry in ipairs(ext.QUESTRUN_CATALOG) do
-        if entry.autoKey and state[entry.autoKey] then count=count+1 end
-    end
-    return count
-end
-local filterRow=rowBase(questPage,32)
-make("TextLabel",filterRow,{
-    BackgroundTransparency=1,Text="REWARD TYPE",TextColor3=colors.muted,
-    Font=Enum.Font.GothamMedium,TextSize=9,TextXAlignment=Enum.TextXAlignment.Left,
-    Position=UDim2.fromOffset(9,0),Size=UDim2.new(0.42,0,1,0),
-})
-local filterButton=make("TextButton",filterRow,{
-    BackgroundColor3=colors.row,TextColor3=colors.white,Font=Enum.Font.GothamMedium,
-    TextSize=9,Text="All rewards  v",BorderSizePixel=0,
-    Size=UDim2.fromOffset(132,24),Position=UDim2.new(1,-140,0.5,-12),
-})
-round(filterButton,5)
-local filterMenu=make("Frame",questPage,{
-    BackgroundColor3=colors.panel,BorderSizePixel=0,Visible=false,
-    Size=UDim2.new(1,-4,0,0),ClipsDescendants=true,
-})
-round(filterMenu,6);edge(filterMenu)
-local filterLayout=make("UIListLayout",filterMenu,{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder})
-make("UIPadding",filterMenu,{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})
-local function closeFilterMenu()
-    questFilterMenuOpen=false
-    filterMenu.Size=UDim2.new(1,-4,0,0)
-    filterMenu.Visible=false
-end
-for _,filterName in ipairs(QUEST_FILTERS) do
-    local option=make("TextButton",filterMenu,{
-        BackgroundColor3=colors.row,TextColor3=colors.white,Font=Enum.Font.GothamMedium,
-        TextSize=9,Text=filterName,BorderSizePixel=0,Size=UDim2.new(1,0,0,23),
-    })
-    round(option,4)
-    track(option.MouseButton1Click:Connect(function()
-        questFilter=filterName
-        filterButton.Text=filterName.."  v"
-        closeFilterMenu()
-        if hub.refreshQuestPicker then hub.refreshQuestPicker() end
-    end))
-end
-track(filterButton.MouseButton1Click:Connect(function()
-    questFilterMenuOpen=not questFilterMenuOpen
-    if questFilterMenuOpen then
-        filterMenu.Visible=true
-        filterMenu.Size=UDim2.new(1,-4,0,#QUEST_FILTERS*25+10)
-    else
-        closeFilterMenu()
-    end
-end))
+    local QUEST_FILTERS = {"All rewards", "Rods", "Skills", "Orbs", "Tickets", "Seasonal", "Other"}
+    local questFilter = "All rewards"
+    local questSearchText = ""
+    local liveQuestEntries = {}
 
-local pickerRow=rowBase(questPage,34)
-local pickerButton=make("TextButton",pickerRow,{
-    BackgroundTransparency=1,TextColor3=colors.white,Font=Enum.Font.GothamMedium,
-    TextSize=10,TextXAlignment=Enum.TextXAlignment.Left,
-    Text="SELECT QUESTLINES ("..hub.questSelectedCount().." selected)  v",
-    Position=UDim2.fromOffset(9,0),Size=UDim2.new(1,-18,1,0),BorderSizePixel=0,
-})
-local pickerPanel=make("Frame",questPage,{
-    BackgroundColor3=colors.panel,BorderSizePixel=0,Visible=false,
-    Size=UDim2.new(1,-4,0,0),ClipsDescendants=true,
-})
-round(pickerPanel,6);edge(pickerPanel)
-local pickerScroll=make("ScrollingFrame",pickerPanel,{
-    BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,
-    ScrollBarImageColor3=colors.accent,Size=UDim2.fromScale(1,1),
-    CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.None,
-})
-local pickerLayout=make("UIListLayout",pickerScroll,{Padding=UDim.new(0,4),SortOrder=Enum.SortOrder.LayoutOrder})
-make("UIPadding",pickerScroll,{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})
-local function updatePickerCaption()
-    pickerButton.Text="SELECT QUESTLINES ("..hub.questSelectedCount().." selected)  "..(questPickerOpen and "^" or "v")
-end
-local function makeQuestEntryRow(entry)
-    local row=make("Frame",pickerScroll,{
-        BackgroundColor3=colors.row,BorderSizePixel=0,Size=UDim2.new(1,-4,0,47),
-    })
-    round(row,5)
-    local name=make("TextLabel",row,{
-        BackgroundTransparency=1,TextColor3=colors.white,Font=Enum.Font.GothamMedium,
-        TextSize=9,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,
-        Text=entry.npc.."  /  "..entry.type,TextTruncate=Enum.TextTruncate.AtEnd,
-        Position=UDim2.fromOffset(7,3),Size=UDim2.new(1,-76,0,17),
-    })
-    local reward=make("TextLabel",row,{
-        BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,
-        TextSize=8,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,
-        Text=tostring(entry.rewardType or "Unknown"):upper().."  |  "..tostring(entry.reward or "Reward unknown"),
-        TextTruncate=Enum.TextTruncate.AtEnd,
-        Position=UDim2.fromOffset(7,21),Size=UDim2.new(1,-76,0,14),
-    })
-    local status=make("TextButton",row,{
-        BackgroundColor3=entry.autoKey and (state[entry.autoKey] and colors.accent or colors.panel) or colors.bg,
-        TextColor3=entry.autoKey and (state[entry.autoKey] and colors.bg or colors.muted) or colors.muted,
-        Font=Enum.Font.GothamBold,TextSize=8,BorderSizePixel=0,
-        Text=entry.autoKey and (state[entry.autoKey] and "ON" or "OFF") or "INFO",
-        Size=UDim2.fromOffset(48,22),Position=UDim2.new(1,-55,0.5,-11),
-    })
-    round(status,5)
-    track(status.MouseButton1Click:Connect(function()
-        if not entry.autoKey then
-            print("[KITKIT QUEST INFO] "..tostring(entry.npc).." | Reward: "..tostring(entry.reward)
-                .." | Objective: "..tostring(entry.objective).." | "..tostring(entry.automation))
-            notify((entry.reward or entry.npc).." - TRACK ONLY; details printed to console")
-            return
+    hub.questSelectedCount = function()
+        local count = 0
+        for _, entry in ipairs(ext.QUESTRUN_CATALOG) do
+            if entry.autoKey and state[entry.autoKey] then count = count + 1 end
         end
-        setState(entry.autoKey,not state[entry.autoKey])
-        status.Text=state[entry.autoKey] and "ON" or "OFF"
-        status.BackgroundColor3=state[entry.autoKey] and colors.accent or colors.panel
-        status.TextColor3=state[entry.autoKey] and colors.bg or colors.muted
-        updatePickerCaption()
-        notify(entry.type.." selection "..(state[entry.autoKey] and "enabled" or "disabled"))
+        return count
+    end
+
+    local selectorCard = rowBase(questPage, 70)
+    make("TextLabel", selectorCard, {
+        BackgroundTransparency = 1,
+        Text = "Selected questlines",
+        TextColor3 = colors.white,
+        Font = Enum.Font.GothamSemibold,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Position = UDim2.fromOffset(14, 8),
+        Size = UDim2.new(1, compact and -112 or -170, 0, 20),
+    })
+    local selectedSummary = make("TextLabel", selectorCard, {
+        BackgroundTransparency = 1,
+        Text = "0 supported handlers selected",
+        TextColor3 = colors.muted,
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Position = UDim2.fromOffset(14, 32),
+        Size = UDim2.new(1, compact and -112 or -170, 0, 20),
+    })
+    local pickerButton = make("TextButton", selectorCard, {
+        BackgroundColor3 = colors.accent,
+        TextColor3 = colors.bg,
+        Text = compact and "SELECT" or "SELECT QUESTS",
+        Font = Enum.Font.GothamBold,
+        TextSize = compact and 10 or 11,
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Size = UDim2.fromOffset(compact and 84 or 112, 34),
+        Position = UDim2.new(1, compact and -98 or -126, 0.5, -17),
+    })
+    round(pickerButton, 8)
+
+    -- Modal is parented to ScreenGui (not the scrolling page), so it cannot be clipped.
+    local pickerOverlay = make("Frame", GUI, {
+        Name = "QuestPickerOverlay",
+        BackgroundTransparency = 1,
+        Size = UDim2.fromScale(1, 1),
+        Visible = false,
+        ZIndex = 80,
+    })
+    hub.questPickerOverlay = pickerOverlay
+    local backdrop = make("TextButton", pickerOverlay, {
+        Name = "Backdrop",
+        Text = "",
+        BackgroundColor3 = Color3.fromRGB(3, 9, 16),
+        BackgroundTransparency = 0.32,
+        BorderSizePixel = 0,
+        Size = UDim2.fromScale(1, 1),
+        ZIndex = 80,
+        AutoButtonColor = false,
+    })
+    local modalWidth = math.max(280, math.min(560, viewport.X - 24))
+    local modalHeight = math.max(300, math.min(560, viewport.Y - 36))
+    local modal = make("Frame", pickerOverlay, {
+        Name = "QuestPicker",
+        BackgroundColor3 = colors.bg,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(modalWidth, modalHeight),
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5),
+        ZIndex = 81,
+        ClipsDescendants = true,
+    })
+    round(modal, 14)
+    edge(modal, colors.outline, 0.12)
+    local modalHeader = make("Frame", modal, {
+        BackgroundColor3 = colors.panel,
+        BorderSizePixel = 0,
+        Size = UDim2.new(1, 0, 0, 58),
+        ZIndex = 82,
+    })
+    make("TextLabel", modalHeader, {
+        BackgroundTransparency = 1,
+        Text = "Choose questlines",
+        TextColor3 = colors.white,
+        Font = Enum.Font.GothamBold,
+        TextSize = 17,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Position = UDim2.fromOffset(18, 7),
+        Size = UDim2.new(1, -74, 0, 24),
+        ZIndex = 83,
+    })
+    make("TextLabel", modalHeader, {
+        BackgroundTransparency = 1,
+        Text = "Select supported quests. INFO entries are reference-only.",
+        TextColor3 = colors.muted,
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Position = UDim2.fromOffset(19, 32),
+        Size = UDim2.new(1, -78, 0, 17),
+        ZIndex = 83,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+    })
+    local modalClose = make("TextButton", modalHeader, {
+        Text = "X",
+        TextColor3 = colors.white,
+        BackgroundColor3 = colors.row,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(32, 32),
+        Position = UDim2.new(1, -44, 0, 13),
+        ZIndex = 84,
+        AutoButtonColor = false,
+    })
+    round(modalClose, 8)
+
+    local searchBox = make("TextBox", modal, {
+        Name = "QuestSearch",
+        BackgroundColor3 = colors.panel,
+        TextColor3 = colors.white,
+        PlaceholderColor3 = colors.muted,
+        PlaceholderText = "Search NPC, quest, island or reward...",
+        Text = "",
+        ClearTextOnFocus = false,
+        Font = Enum.Font.Gotham,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(14, 70),
+        Size = UDim2.new(1, -28, 0, 38),
+        ZIndex = 82,
+    })
+    round(searchBox, 8)
+    edge(searchBox, colors.outline, 0.52)
+    make("UIPadding", searchBox, {
+        PaddingLeft = UDim.new(0, 12),
+        PaddingRight = UDim.new(0, 10),
+    })
+
+    local filterStrip = make("ScrollingFrame", modal, {
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(14, 116),
+        Size = UDim2.new(1, -28, 0, 34),
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.X,
+        ScrollingDirection = Enum.ScrollingDirection.X,
+        ScrollBarThickness = 0,
+        ZIndex = 82,
+    })
+    local filterStripLayout = make("UIListLayout", filterStrip, {
+        FillDirection = Enum.FillDirection.Horizontal,
+        Padding = UDim.new(0, 6),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+    })
+    local pickerScroll = make("ScrollingFrame", modal, {
+        Name = "QuestEntries",
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        Position = UDim2.fromOffset(14, 158),
+        Size = UDim2.new(1, -28, 1, -224),
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = colors.accent,
+        CanvasSize = UDim2.new(),
+        AutomaticCanvasSize = Enum.AutomaticSize.None,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        ZIndex = 82,
+    })
+    local pickerLayout = make("UIListLayout", pickerScroll, {
+        Padding = UDim.new(0, 7),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+    })
+    make("UIPadding", pickerScroll, {
+        PaddingTop = UDim.new(0, 3),
+        PaddingBottom = UDim.new(0, 6),
+        PaddingLeft = UDim.new(0, 2),
+        PaddingRight = UDim.new(0, 5),
+    })
+
+    local footerLine = make("Frame", modal, {
+        BackgroundColor3 = colors.outline,
+        BackgroundTransparency = 0.45,
+        BorderSizePixel = 0,
+        Position = UDim2.new(0, 14, 1, -57),
+        Size = UDim2.new(1, -28, 0, 1),
+        ZIndex = 82,
+    })
+    local clearButton = make("TextButton", modal, {
+        Text = "CLEAR SELECTIONS",
+        TextColor3 = colors.muted,
+        BackgroundColor3 = colors.row,
+        Font = Enum.Font.GothamBold,
+        TextSize = 10,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(142, 34),
+        Position = UDim2.new(0, 14, 1, -47),
+        ZIndex = 82,
+        AutoButtonColor = false,
+    })
+    round(clearButton, 8)
+    local doneButton = make("TextButton", modal, {
+        Text = "DONE",
+        TextColor3 = colors.bg,
+        BackgroundColor3 = colors.accent,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        BorderSizePixel = 0,
+        Size = UDim2.fromOffset(100, 34),
+        Position = UDim2.new(1, -114, 1, -47),
+        ZIndex = 82,
+        AutoButtonColor = false,
+    })
+    round(doneButton, 8)
+
+    local function closeQuestPicker()
+        pickerOverlay.Visible = false
+    end
+    track(backdrop.MouseButton1Click:Connect(closeQuestPicker))
+    track(modalClose.MouseButton1Click:Connect(closeQuestPicker))
+    track(doneButton.MouseButton1Click:Connect(closeQuestPicker))
+
+    local function questFilterMatches(entry)
+        if questFilter == "All rewards" then return true end
+        local kind = tostring(entry.rewardType or "Unknown")
+        if questFilter == "Rods" then return kind == "Rod" or kind == "Rod Skin" end
+        if questFilter == "Skills" then return kind == "Skill" end
+        if questFilter == "Orbs" then return kind == "Orb" end
+        if questFilter == "Tickets" then return kind == "Ticket" end
+        if questFilter == "Seasonal" then return kind == "Seasonal" or kind == "Rod Skin" end
+        return kind == "Daily" or kind == "Other" or kind == "Unknown"
+    end
+    local function questSearchMatches(entry)
+        local q = string.lower(questSearchText or "")
+        if q == "" then return true end
+        local haystack = table.concat({
+            tostring(entry.npc or ""), tostring(entry.type or ""),
+            tostring(entry.reward or ""), tostring(entry.rewardType or ""),
+            tostring(entry.island or ""), tostring(entry.objective or ""),
+        }, " "):lower()
+        return string.find(haystack, q, 1, true) ~= nil
+    end
+    local function updateQuestSummary()
+        local count = hub.questSelectedCount()
+        selectedSummary.Text = tostring(count) .. " supported handler(s) selected"
+        pickerButton.Text = compact and "SELECT" or "SELECT QUESTS"
+    end
+    local function makeQuestEntryRow(entry)
+        local row = make("Frame", pickerScroll, {
+            BackgroundColor3 = colors.row,
+            BorderSizePixel = 0,
+            Size = UDim2.new(1, -5, 0, 76),
+            ZIndex = 83,
+        })
+        round(row, 9)
+        local titleText = make("TextLabel", row, {
+            BackgroundTransparency = 1,
+            Text = tostring(entry.npc or "Unknown NPC") .. "  /  " .. tostring(entry.type or "Quest"),
+            TextColor3 = colors.white,
+            Font = Enum.Font.GothamSemibold,
+            TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Position = UDim2.fromOffset(12, 7),
+            Size = UDim2.new(1, -118, 0, 18),
+            ZIndex = 84,
+        })
+        local rewardText = make("TextLabel", row, {
+            BackgroundTransparency = 1,
+            Text = string.upper(tostring(entry.rewardType or "Reward")) .. "  /  " .. tostring(entry.reward or "Reward not listed"),
+            TextColor3 = colors.accent,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Position = UDim2.fromOffset(12, 28),
+            Size = UDim2.new(1, -118, 0, 17),
+            ZIndex = 84,
+        })
+        local detailText = make("TextLabel", row, {
+            BackgroundTransparency = 1,
+            Text = tostring(entry.island or "Location unknown") .. "  /  " .. tostring(entry.objective or entry.automation or "Details unavailable"),
+            TextColor3 = colors.muted,
+            Font = Enum.Font.Gotham,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Position = UDim2.fromOffset(12, 49),
+            Size = UDim2.new(1, -118, 0, 16),
+            ZIndex = 84,
+        })
+        local supported = entry.autoKey ~= nil
+        local selected = supported and state[entry.autoKey] == true
+        local status = make("TextButton", row, {
+            BackgroundColor3 = supported and (selected and colors.accent or colors.panel) or colors.panel,
+            TextColor3 = supported and (selected and colors.bg or colors.white) or colors.gold,
+            Text = supported and (selected and "SELECTED" or "ADD") or "INFO",
+            Font = Enum.Font.GothamBold,
+            TextSize = 12,
+            BorderSizePixel = 0,
+            Size = UDim2.fromOffset(88, 28),
+            Position = UDim2.new(1, -100, 0.5, -14),
+            ZIndex = 84,
+            AutoButtonColor = false,
+        })
+        round(status, 8)
+        track(status.MouseButton1Click:Connect(function()
+            if not supported then
+                print("[KITKIT QUEST INFO] " .. tostring(entry.npc)
+                    .. " | Reward: " .. tostring(entry.reward)
+                    .. " | Objective: " .. tostring(entry.objective)
+                    .. " | " .. tostring(entry.automation))
+                notify(tostring(entry.reward or entry.npc) .. " is reference-only; no verified auto handler yet.")
+                return
+            end
+            setState(entry.autoKey, not state[entry.autoKey])
+            updateQuestSummary()
+            if hub.refreshQuestPicker then hub.refreshQuestPicker() end
+        end))
+    end
+
+    local function rebuildQuestPicker()
+        for _, child in ipairs(pickerScroll:GetChildren()) do
+            if child:IsA("Frame") then child:Destroy() end
+        end
+        local entries = {}
+        for _, entry in ipairs(ext.QUESTRUN_CATALOG) do
+            if questFilterMatches(entry) and questSearchMatches(entry) then
+                table.insert(entries, entry)
+            end
+        end
+        for _, entry in ipairs(liveQuestEntries) do
+            if questFilterMatches(entry) and questSearchMatches(entry) then
+                table.insert(entries, entry)
+            end
+        end
+        table.sort(entries, function(a, b)
+            local at = tostring(a.rewardType or "Unknown") .. tostring(a.npc or "")
+            local bt = tostring(b.rewardType or "Unknown") .. tostring(b.npc or "")
+            return at < bt
+        end)
+        for _, entry in ipairs(entries) do makeQuestEntryRow(entry) end
+        task.defer(function()
+            pickerScroll.CanvasSize = UDim2.fromOffset(0, pickerLayout.AbsoluteContentSize.Y + 10)
+        end)
+        updateQuestSummary()
+    end
+    hub.refreshQuestPicker = rebuildQuestPicker
+    track(pickerLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        pickerScroll.CanvasSize = UDim2.fromOffset(0, pickerLayout.AbsoluteContentSize.Y + 10)
     end))
-    if not entry.autoKey then
-        track(row.InputBegan:Connect(function(input)
-            if input.UserInputType==Enum.UserInputType.MouseButton1 then
-                notify(entry.npc.." -> "..entry.reward.." | "..entry.automation)
+
+    local filterButtons = {}
+    local function setQuestFilter(name)
+        questFilter = name
+        for filterName, button in pairs(filterButtons) do
+            local selected = filterName == name
+            button.BackgroundColor3 = selected and colors.accentSoft or colors.panel
+            button.TextColor3 = selected and colors.accent or colors.muted
+        end
+        rebuildQuestPicker()
+    end
+    for _, filterName in ipairs(QUEST_FILTERS) do
+        local chip = make("TextButton", filterStrip, {
+            BackgroundColor3 = filterName == questFilter and colors.accentSoft or colors.panel,
+            TextColor3 = filterName == questFilter and colors.accent or colors.muted,
+            Text = filterName,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 12,
+            BorderSizePixel = 0,
+            Size = UDim2.fromOffset(filterName == "All rewards" and 94 or 76, 30),
+            ZIndex = 83,
+            AutoButtonColor = false,
+        })
+        round(chip, 8)
+        filterButtons[filterName] = chip
+        track(chip.MouseButton1Click:Connect(function()
+            setQuestFilter(filterName)
+        end))
+    end
+    track(searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+        questSearchText = searchBox.Text
+        rebuildQuestPicker()
+    end))
+    track(clearButton.MouseButton1Click:Connect(function()
+        for _, entry in ipairs(ext.QUESTRUN_CATALOG) do
+            if entry.autoKey then setState(entry.autoKey, false) end
+        end
+        updateQuestSummary()
+        rebuildQuestPicker()
+        notify("Supported quest selections cleared. Master switch remains unchanged.")
+    end))
+    track(pickerButton.MouseButton1Click:Connect(function()
+        rebuildQuestPicker()
+        pickerOverlay.Visible = true
+    end))
+
+    updateQuestSummary()
+    rebuildQuestPicker()
+
+    -- The category filter lives in the searchable picker; this ticket selector is independent.
+    section(questPage, "Quest settings")
+    local function makeSingleChoiceDropdown(parent, label, options, getCurrent, onSelect)
+        local row = rowBase(parent, 46)
+        make("TextLabel", row, {
+            BackgroundTransparency = 1,
+            Text = label,
+            TextColor3 = colors.muted,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Position = UDim2.fromOffset(13, 0),
+            Size = UDim2.new(1, -(compact and 142 or 184), 1, 0),
+        })
+        local dropdownWidth = compact and 118 or 158
+        local button = make("TextButton", row, {
+            BackgroundColor3 = colors.row,
+            TextColor3 = colors.white,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 11,
+            Text = "",
+            BorderSizePixel = 0,
+            Size = UDim2.fromOffset(dropdownWidth, 30),
+            Position = UDim2.new(1, -dropdownWidth - 13, 0.5, -15),
+            AutoButtonColor = false,
+        })
+        round(button, 8)
+        local menu = make("Frame", parent, {
+            BackgroundColor3 = colors.panel,
+            BorderSizePixel = 0,
+            Visible = false,
+            Size = UDim2.new(1, -4, 0, 0),
+            ClipsDescendants = true,
+        })
+        round(menu, 9)
+        edge(menu, colors.outline, 0.35)
+        local function refresh()
+            button.Text = tostring(getCurrent()) .. "  v"
+        end
+        local function close()
+            menu.Size = UDim2.new(1, -4, 0, 0)
+            menu.Visible = false
+        end
+        for _, optionName in ipairs(options) do
+            local option = make("TextButton", menu, {
+                BackgroundColor3 = colors.row,
+                TextColor3 = colors.white,
+                Font = Enum.Font.GothamMedium,
+                TextSize = 12,
+                Text = optionName,
+                BorderSizePixel = 0,
+                Size = UDim2.new(1, -8, 0, 30),
+                AutoButtonColor = false,
+            })
+            round(option, 7)
+            track(option.MouseButton1Click:Connect(function()
+                onSelect(optionName)
+                refresh()
+                close()
+            end))
+        end
+        make("UIListLayout", menu, {Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder})
+        make("UIPadding", menu, {
+            PaddingTop = UDim.new(0, 5), PaddingBottom = UDim.new(0, 5),
+            PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5),
+        })
+        track(button.MouseButton1Click:Connect(function()
+            if menu.Visible then
+                close()
+            else
+                menu.Visible = true
+                menu.Size = UDim2.new(1, -4, 0, #options * 33 + 12)
             end
         end))
+        refresh()
+        return refresh
     end
-end
-local function rebuildQuestPicker()
-    for _,child in ipairs(pickerScroll:GetChildren()) do
-        if child:IsA("Frame") then child:Destroy() end
-    end
-    local entries={}
-    for _,entry in ipairs(ext.QUESTRUN_CATALOG) do
-        if questFilterMatches(entry) then table.insert(entries,entry) end
-    end
-    for _,entry in ipairs(liveQuestEntries) do
-        if questFilterMatches(entry) then table.insert(entries,entry) end
-    end
-    table.sort(entries,function(a,b)
-        local at=tostring(a.rewardType or "Unknown")..tostring(a.npc or "")
-        local bt=tostring(b.rewardType or "Unknown")..tostring(b.npc or "")
-        return at<bt
+    makeSingleChoiceDropdown(questPage, "Ticket difficulty", {"Easy", "Hard"}, function()
+        return state.ticketQuestMode
+    end, function(value)
+        state.ticketQuestMode = value
+        notify("Ticket quest difficulty: " .. value)
     end)
-    for _,entry in ipairs(entries) do makeQuestEntryRow(entry) end
-    task.defer(function()
-        pickerScroll.CanvasSize=UDim2.fromOffset(0,pickerLayout.AbsoluteContentSize.Y+8)
-    end)
-    updatePickerCaption()
-end
-hub.refreshQuestPicker=rebuildQuestPicker
-track(pickerLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-    pickerScroll.CanvasSize=UDim2.fromOffset(0,pickerLayout.AbsoluteContentSize.Y+8)
-end))
-track(pickerButton.MouseButton1Click:Connect(function()
-    questPickerOpen=not questPickerOpen
-    if questPickerOpen then
+
+    action(questPage, "SCAN LIVE QUEST MODULES + REWARDS", function()
+        local modules, err = ext.discoverLiveQuestModules()
+        if not modules then notify(err or "Live quest modules unavailable"); return end
+        liveQuestEntries = {}
+        local known = {}
+        for _, entry in ipairs(ext.QUESTRUN_CATALOG) do
+            known[tostring(entry.id or ""):lower()] = true
+            known[tostring(entry.npc or ""):lower()] = true
+        end
+        for _, module in ipairs(modules) do
+            if not known[module.name:lower()] then
+                table.insert(liveQuestEntries, {
+                    id = "Live_" .. module.name,
+                    npc = "Live quest: " .. module.name,
+                    island = "Live data",
+                    reward = module.reward,
+                    rewardType = "Unknown",
+                    type = "Live module",
+                    objective = tostring(module.objectiveCount) .. " objective rows",
+                    automation = "Track only: module discovered, but NPC dialogue / reward handler is not verified",
+                })
+            end
+        end
         rebuildQuestPicker()
-        pickerPanel.Visible=true
-        pickerPanel.Size=UDim2.new(1,-4,0,188)
-    else
-        pickerPanel.Size=UDim2.new(1,-4,0,0)
-        pickerPanel.Visible=false
-    end
-    updatePickerCaption()
-end))
-rebuildQuestPicker()
-
-local function makeSingleChoiceDropdown(parent,label,options,getCurrent,onSelect)
-    local row=rowBase(parent,32)
-    make("TextLabel",row,{
-        BackgroundTransparency=1,Text=label,TextColor3=colors.muted,
-        Font=Enum.Font.GothamMedium,TextSize=9,TextXAlignment=Enum.TextXAlignment.Left,
-        Position=UDim2.fromOffset(9,0),Size=UDim2.new(0.42,0,1,0),
-    })
-    local button=make("TextButton",row,{
-        BackgroundColor3=colors.row,TextColor3=colors.white,
-        Font=Enum.Font.GothamMedium,TextSize=9,Text="",BorderSizePixel=0,
-        Size=UDim2.fromOffset(132,24),Position=UDim2.new(1,-140,0.5,-12),
-    })
-    round(button,5)
-    local menu=make("Frame",parent,{
-        BackgroundColor3=colors.panel,BorderSizePixel=0,Visible=false,
-        Size=UDim2.new(1,-4,0,0),ClipsDescendants=true,
-    })
-    round(menu,6);edge(menu)
-    local function refresh()
-        button.Text=tostring(getCurrent()).."  v"
-    end
-    local function close()
-        menu.Size=UDim2.new(1,-4,0,0)
-        menu.Visible=false
-    end
-    for _,optionName in ipairs(options) do
-        local option=make("TextButton",menu,{
-            BackgroundColor3=colors.row,TextColor3=colors.white,
-            Font=Enum.Font.GothamMedium,TextSize=9,Text=optionName,
-            BorderSizePixel=0,Size=UDim2.new(1,-8,0,23),
-        })
-        round(option,4)
-        track(option.MouseButton1Click:Connect(function()
-            onSelect(optionName)
-            refresh()
-            close()
-        end))
-    end
-    make("UIListLayout",menu,{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder})
-    make("UIPadding",menu,{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})
-    track(button.MouseButton1Click:Connect(function()
-        if menu.Visible then close() else
-            menu.Visible=true
-            menu.Size=UDim2.new(1,-4,0,#options*25+10)
+        notify("Scanned " .. #modules .. " live quest modules; " .. #liveQuestEntries .. " additional entries added.")
+    end)
+    action(questPage, "TELEPORT TO BATTLEFIELD SAGE", function()
+        local npc = ext.findQuestNPC("sage", "Battlefield Isle")
+        hub.manualTravelUntil = os.clock() + 65
+        teleportTo(npc and npc.CFrame * CFrame.new(0, 0, -7) or cframeIsland("Battlefield Isle"), "Sage Yijiu")
+    end)
+    action(questPage, "READ SELECTED QUEST STATUS", function()
+        local out = {
+            "Master: " .. tostring(state.autoQuests),
+            "Sage: " .. ext.questTracker.sage,
+            "Ticket: " .. ext.questTracker.ticketStatus,
+            "Zeng: " .. ext.questTracker.zengStatus,
+            ext.sideQuestStatus(),
+        }
+        for _, line in ipairs(out) do print("[KITKIT QUEST] " .. line) end
+        notify("Quest status printed to executor console")
+    end)
+    action(questPage, "PRINT QUEST CATALOG + REWARDS", function()
+        for i, q in ipairs(ext.QUESTRUN_CATALOG) do
+            print(("[KITKIT QUEST %02d] %s @ %s | %s: %s | %s"):format(i, q.npc, q.island, q.rewardType, q.reward, q.automation))
         end
-    end))
-    refresh()
-    return refresh
-end
-makeSingleChoiceDropdown(questPage,"TICKET DIFFICULTY",{"Easy","Hard"},function()
-    return state.ticketQuestMode
-end,function(value)
-    state.ticketQuestMode=value
-    notify("Ticket quest difficulty: "..value)
-end)
-
-action(questPage,"SCAN LIVE QUEST MODULES + REWARDS",function()
-    local modules,err=ext.discoverLiveQuestModules()
-    if not modules then notify(err or "Live quest modules unavailable");return end
-    liveQuestEntries={}
-    local known={}
-    for _,entry in ipairs(ext.QUESTRUN_CATALOG) do
-        known[tostring(entry.id or ""):lower()]=true
-        known[tostring(entry.npc or ""):lower()]=true
-    end
-    for _,module in ipairs(modules) do
-        if not known[module.name:lower()] then
-            table.insert(liveQuestEntries,{
-                id="Live_"..module.name,npc="Live quest: "..module.name,
-                island="Live data",reward=module.reward,rewardType="Unknown",
-                type="Live module",objective=tostring(module.objectiveCount).." objective rows",
-                automation="Track only: module discovered, but NPC dialogue / reward handler is not verified",
-            })
-        end
-    end
-    rebuildQuestPicker()
-    notify("Scanned "..#modules.." live quest modules; "..#liveQuestEntries.." additional entries added. Unknown rewards stay marked unknown.")
-end)
-action(questPage,"TP TO BATTLEFIELD SAGE",function()
-    local npc=ext.findQuestNPC("sage","Battlefield Isle")
-    hub.manualTravelUntil=os.clock()+65
-    teleportTo(npc and npc.CFrame*CFrame.new(0,0,-7) or cframeIsland("Battlefield Isle"),"Sage Yijiu")
-end)
-action(questPage,"READ SELECTED QUEST STATUS",function()
-    local out={"Master: "..tostring(state.autoQuests),"Sage: "..ext.questTracker.sage,
-        "Ticket: "..ext.questTracker.ticketStatus,"Zeng: "..ext.questTracker.zengStatus,ext.sideQuestStatus()}
-    for _,line in ipairs(out) do print("[KITKIT QUEST] "..line) end
-    notify("Selected quest status printed to executor console")
-end)
-action(questPage,"PRINT QUEST CATALOG + REWARDS",function()
-    for i,q in ipairs(ext.QUESTRUN_CATALOG) do
-        print(("[KITKIT QUEST %02d] %s @ %s | %s: %s | %s"):format(i,q.npc,q.island,q.rewardType,q.reward,q.automation))
-    end
-    notify("Quest catalog and reward categories printed to executor console")
-end)
-make("TextLabel",questPage,{
-    Text="ON/OFF entries have a handler in this build. INFO entries show researched or newly announced rewards but are TRACK ONLY until live NPC dialogue and objectives are verified. Samba and Halloween details are from the latest update log; their requirements are not yet confirmed.",
-    TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,TextXAlignment=Enum.TextXAlignment.Left,
-    BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,TextSize=9,
-    Size=UDim2.new(1,-4,0,66),
-})
+        notify("Quest catalog printed to executor console")
+    end)
+    make("TextLabel", questPage, {
+        Text = "Supported entries can be selected for automation. INFO entries show known rewards/objectives but remain reference-only until their live dialogue and completion handlers are verified.",
+        TextWrapped = true,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        BackgroundTransparency = 1,
+        TextColor3 = colors.muted,
+        Font = Enum.Font.Gotham,
+        TextSize = 11,
+        Size = UDim2.new(1, -4, 0, 58),
+    })
 end
 buildQuestUI()
 
 section(craftPage,"Auto gather + craft (separate)")
 local craftHUD=make("TextLabel",craftPage,{
     BackgroundColor3=colors.panel,TextColor3=colors.accent,
-    Font=Enum.Font.Gotham,TextSize=compact and 10 or 11,
+    Font=Enum.Font.Gotham,TextSize=compact and 11 or 12,
     Text="Crafting OFF",TextWrapped=true,
     TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
     Size=UDim2.new(1,-4,0,99),
 })
-round(craftHUD,7)
+round(craftHUD,9);edge(craftHUD,colors.outline,0.72)
 action(craftPage,"TARGET ROD: Heavenpiercer Rod",function(btn)
     state.craftTarget=state.craftTarget=="Heavenpiercer Rod" and "Pure Diamond Rod" or "Heavenpiercer Rod"
     ext.craftTracker.status="Target changed; protecting ingredients for "..state.craftTarget
@@ -2987,19 +3485,19 @@ end)
 make("TextLabel",craftPage,{
     Text="Weather must match to farm each weather fish. Rainbow/Frost bait fish require bait. Missing live recipe, Gem balance, or fish blocks crafting; server decides success. We never claim a craft succeeded without the rod in your inventory.",
     TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,TextXAlignment=Enum.TextXAlignment.Left,
-    BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,TextSize=11,
+    BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,TextSize=12,
     Size=UDim2.new(1,-4,0,87),
 })
 
 section(fishPage, "Fishing automation")
 local reelStatusHUD = make("TextLabel", fishPage, {
     BackgroundColor3 = colors.panel, TextColor3 = colors.accent,
-    Font = Enum.Font.GothamMedium, TextSize = compact and 10 or 11,
+    Font = Enum.Font.GothamMedium, TextSize = compact and 11 or 12,
     Text = "BAR GUARD: OFF | Corrections 0 | Reel requests 0",
     TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
     Size = UDim2.new(1, -4, 0, 38),
 })
-round(reelStatusHUD, 7)
+round(reelStatusHUD, 9);edge(reelStatusHUD,colors.outline,0.72)
 local masterBtn = action(fishPage, "START FULL AUTO FISHING (NO SELL)", function(btn)
     local enable = not state.autoCast
     for _, k in ipairs({"autoCast", "autoReel", "lockBar", "autoSkill", "slam", "charge", "rhythm", "phase2"}) do
@@ -3050,7 +3548,7 @@ end)
 section(bossPage, "Boss farming")
 local bossInfo = make("TextLabel", bossPage, {
     Text = "Enzo and Long Diaohai use the game's StartBossFight event.\nBoss phase 2 automation is EXPERIMENTAL.",
-    TextWrapped = true, TextSize = 11, Font = Enum.Font.Gotham,
+    TextWrapped = true, TextSize = 12, Font = Enum.Font.Gotham,
     TextColor3 = colors.muted, BackgroundTransparency = 1,
     Size = UDim2.new(1, -6, 0, 43), TextXAlignment = Enum.TextXAlignment.Left,
 })
@@ -3116,22 +3614,22 @@ action(worldPage,"TP TO TAOIST (if spawned)",function() ext.tpMerchant("Taoist")
 -- Clickable toast stays visible even when the main window is minimized.
 local roamingPopup=make("Frame",GUI,{
     Name="MerchantAlerts", BackgroundColor3=colors.panel,BorderSizePixel=0,
-    Position=UDim2.new(1,-205,0,93), Size=UDim2.fromOffset(193,86),
+    Position=UDim2.new(1,-260,0,92), Size=UDim2.fromOffset(244,106),
     Visible=false, ZIndex=20,
 })
 round(roamingPopup,9);edge(roamingPopup,colors.gold)
 make("TextLabel",roamingPopup,{
     Text="MERCHANT NEARBY",TextColor3=colors.accent,
-    BackgroundTransparency=1,TextSize=10,Font=Enum.Font.GothamBold,
+    BackgroundTransparency=1,TextSize=12,Font=Enum.Font.GothamBold,
     Size=UDim2.new(1,-16,0,22),Position=UDim2.fromOffset(8,2),ZIndex=21,
 })
 local merchantButtons={}
 for i,name in ipairs({"Maoshan","Taoist"}) do
     local btn=make("TextButton",roamingPopup,{
         Text=name.."   /   teleport",BackgroundColor3=colors.row,
-        TextColor3=colors.white,Font=Enum.Font.GothamMedium,TextSize=10,
-        Position=UDim2.fromOffset(7,25+(i-1)*29),
-        Size=UDim2.new(1,-14,0,26),Visible=false,ZIndex=21,
+        TextColor3=colors.white,Font=Enum.Font.GothamMedium,TextSize=12,
+        Position=UDim2.fromOffset(8,28+(i-1)*34),
+        Size=UDim2.new(1,-16,0,30),Visible=false,ZIndex=21,
     })
     round(btn,5)
     merchantButtons[name]=btn
@@ -3141,10 +3639,10 @@ end
 section(worldPage, "Server weather")
 local weatherLabel = make("TextLabel", worldPage, {
     BackgroundColor3 = colors.panel, TextColor3 = colors.accent,
-    Font = Enum.Font.GothamBold, TextSize = 13, Text = "Current weather: ...",
-    Size = UDim2.new(1, -4, 0, 36),
+    Font = Enum.Font.GothamBold, TextSize = 14, Text = "Current weather: ...",
+    Size = UDim2.new(1, -4, 0, 44),
 })
-round(weatherLabel, 7)
+round(weatherLabel, 9);edge(weatherLabel,colors.outline,0.72)
 toggle(worldPage, "Notify me for fog / mist", "fogAlert")
 action(worldPage, "SERVER HOP ONCE (new public server)", function()
     notify("Fetching public Roblox servers... may not work on all executors")
@@ -3220,7 +3718,7 @@ section(extraPage, "Safety and controls")
 make("TextLabel", extraPage, {
     BackgroundTransparency = 1, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = colors.muted,
-    Font = Enum.Font.Gotham, TextSize = 11,
+    Font = Enum.Font.Gotham, TextSize = 12,
     Text = "Auto Sell, Auto Quests and Auto Craft are independent. Level route saves Cash for one target rod per island. "
         .. "Crafting uses server-replicated recipes and can spend Gems with a chance of failure. "
         .. "Material fish must be favorited before Sell All. Quest/shop/craft features are best-effort and LIVE UNTESTED.",
@@ -3245,7 +3743,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.6 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.7 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
@@ -3294,13 +3792,23 @@ hub.keybindButton=action(extraPage,"MENU KEYBIND  /  K",function(btn)
     btn.Text="Press any keyboard key..."
 end)
 function hub.toggleMenu()
-    main.Visible=not main.Visible
+    main.Visible = not main.Visible
+    if not main.Visible and hub.questPickerOverlay then
+        hub.questPickerOverlay.Visible = false
+    end
 end
-track(closeButton.MouseButton1Click:Connect(function() main.Visible=false end))
+track(closeButton.MouseButton1Click:Connect(function()
+    main.Visible = false
+    if hub.questPickerOverlay then hub.questPickerOverlay.Visible = false end
+end))
 track(bubble.MouseButton1Click:Connect(hub.toggleMenu))
 track(UIS.InputBegan:Connect(function(input, processed)
     if not hub.running then return end
     if input.UserInputType~=Enum.UserInputType.Keyboard then return end
+    if input.KeyCode == Enum.KeyCode.Escape and hub.questPickerOverlay and hub.questPickerOverlay.Visible then
+        hub.questPickerOverlay.Visible = false
+        return
+    end
     if UIS:GetFocusedTextBox() then return end
     if hub.waitingForBind then
         hub.waitingForBind=false
@@ -3333,6 +3841,24 @@ function hub:Unload()
     if env.KITKIT_HeavyweightFishing == self then env.KITKIT_HeavyweightFishing = nil end
     print("[KITKIT] Unloaded. All tracked loops and connections stopped.")
 end
+
+return {
+    colors = colors,
+    main = main,
+    headerSubtitle = headerSubtitle,
+    statusTop = statusTop,
+    statusBottom = statusBottom,
+    weatherLabel = weatherLabel,
+    reelStatusHUD = reelStatusHUD,
+    levelingHUD = levelingHUD,
+    craftHUD = craftHUD,
+    merchantButtons = merchantButtons,
+    roamingPopup = roamingPopup,
+    routeHUD = routeHUD,
+    levelBtn = levelBtn,
+}
+end
+hub.ui = buildInterface()
 
 local function skillReady(char, key, fg)
     local skills = char and char:FindFirstChild("Skills")
@@ -3505,7 +4031,7 @@ local function stopAutoLevel(reason)
         setState(k,false)
     end
     progressionStatus=reason
-    if levelBtn then levelBtn.Text="START AUTO LEVEL TO 500" end
+    if hub.ui and hub.ui.levelBtn then hub.ui.levelBtn.Text="START AUTO LEVEL TO 500" end
     notify(reason)
 end
 local function progressionTick()
@@ -3797,25 +4323,25 @@ task.spawn(function()
         if override then route=override end
         local activeTime=math.max(1,(os.clock()-firstProfileAt)/3600)
         local gainRate=levelGained/activeTime
-        statusTop.Text="Lv "..tostring(p.level or "?").."  /  Bag "..tostring(count or "?").."/"..tostring(cap or "?")
+        hub.ui.statusTop.Text="Lv "..tostring(p.level or "?").."  /  Bag "..tostring(count or "?").."/"..tostring(cap or "?")
             .."  /  "..weather
-        weatherLabel.Text="Current weather: "..weather
-        statusBottom.Text=lastAction
-        hub.bubbleDot.BackgroundColor3=(state.autoLevel or state.autoCast) and colors.accent or colors.muted
-        reelStatusHUD.Text="BAR GUARD: "..barGuard.status
+        hub.ui.weatherLabel.Text="Current weather: "..weather
+        hub.ui.statusBottom.Text=lastAction
+        hub.bubbleDot.BackgroundColor3=(state.autoLevel or state.autoCast) and hub.ui.colors.accent or hub.ui.colors.muted
+        hub.ui.reelStatusHUD.Text="BAR GUARD: "..barGuard.status
             .." | Snaps "..barGuard.corrections
             .." | Reel requests "..reelRequests
         if state.autoLevel then
-            headerSubtitle.Text="LEVELING  /  "..barGuard.status
-            headerSubtitle.TextColor3=colors.accent
+            hub.ui.headerSubtitle.Text="LEVELING  /  "..barGuard.status
+            hub.ui.headerSubtitle.TextColor3=hub.ui.colors.accent
         elseif state.autoCast or state.autoReel or state.lockBar then
-            headerSubtitle.Text="FISHING  /  "..barGuard.status
-            headerSubtitle.TextColor3=colors.gold
+            hub.ui.headerSubtitle.Text="FISHING  /  "..barGuard.status
+            hub.ui.headerSubtitle.TextColor3=hub.ui.colors.gold
         else
-            headerSubtitle.Text="HEAVYWEIGHT  /  2.6"
-            headerSubtitle.TextColor3=colors.muted
+            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.7"
+            hub.ui.headerSubtitle.TextColor3=hub.ui.colors.muted
         end
-        levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
+        hub.ui.levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
             .." | "..tostring(p.rod~="" and p.rod or "Rod unknown")
             .."\nPower "..tostring(power or "?").." | "..tostring(p.cash or "?").." Cash"
             .." | "..string.format("%.1f",gainRate).." Lv/h"
@@ -3831,7 +4357,7 @@ task.spawn(function()
         for _,entry in ipairs(recipe and recipe.fish or {}) do
             if (ext.ownedFishCount(entry.name) or 0)>=1 then gathered=gathered+1 end
         end
-        craftHUD.Text=state.craftTarget.." ["..gathered.."/"..needed.."] "
+        hub.ui.craftHUD.Text=state.craftTarget.." ["..gathered.."/"..needed.."] "
             ..(state.autoFarmMaterials and "FARM ON" or "FARM OFF")
             .." | Weather "..weather.."\n"..ext.craftTracker.status
             .."\nNext fish: "..tostring(ext.craftTracker.fish or "--")
@@ -3839,11 +4365,11 @@ task.spawn(function()
         local merchantActive=false
         for _,name in ipairs({"Maoshan","Taoist"}) do
             local available=ext.merchantTracker[name]~=nil
-            merchantButtons[name].Visible=available and state.merchantAlerts
+            hub.ui.merchantButtons[name].Visible=available and state.merchantAlerts
             merchantActive=merchantActive or available
         end
-        roamingPopup.Visible=merchantActive and state.merchantAlerts
-        routeHUD.Text="ROUTE  /  "..hub.routeGate.status
+        hub.ui.roamingPopup.Visible=merchantActive and state.merchantAlerts
+        hub.ui.routeHUD.Text="ROUTE  /  "..hub.routeGate.status
             .."\n"..progressionStatus
             .."\nSHOP  /  "..rodShop.status
             .."\nNEXT  /  "..(suggested and (suggested.name.." ("..suggested.cost.." Cash)") or "Complete")
@@ -3851,7 +4377,7 @@ task.spawn(function()
     end
 end)
 
-report("KITKIT v2.6 ready. Click the small K icon or press K to open the menu.")
+report("KITKIT v2.7 ready. Click the small K icon or press K to open the menu.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
