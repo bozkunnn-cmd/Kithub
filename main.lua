@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.5 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.6 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
@@ -1323,23 +1323,28 @@ local craftTracker = {status="Idle", route=nil, fish=nil, lastAt=-math.huge,
 local merchantTracker = {Maoshan=nil,Taoist=nil, lastSeen={}, lastScan=-math.huge,
     alerts=0, seenThisSession={}}
 local QUESTRUN_CATALOG = {
-    {npc="Sage Yijiu",island="Battlefield Isle",reward="Diamond Rod",type="Sage 1",objective="5 catches of at least 1,500,000 kg each"},
-    {npc="Sage Yijiu",island="Battlefield Isle",reward="Phoenix Annihilation Art",type="Sage 2",objective="Phoenix Strive Art v2; 250 catches; 1.5M kg Scarlet and Elder Scarlet, Bamboo Thunderstorm"},
-    {npc="Sage Yijiu",island="Battlefield Isle",reward="Fivefold Ascension",type="Sage 3",objective="2M kg Draconic Koi; Sever The Gate v3; 10 catches of 1M kg"},
-    {npc="Sage Yijiu",island="Battlefield Isle",reward="Tenfold Convergence",type="Sage 4",objective="6M kg Rainbow Dragon Fish; 50 uses of Fivefold Ascension"},
-    {npc="Sage Yijiu",island="Battlefield Isle",reward="One Hook Dominance",type="Sage 5",objective="5M kg Frost Kingfish; 6.5M kg Frost Queen; 100 uses of Tenfold"},
-    {npc="Biao Di",island="Frost Isle",reward="Cryo Gravity Rod",type="Rod quest",objective="100 Frost catches, two 1M+ kg Primordial Kunfish Overlords, four Primordial Kunfish"},
-    {npc="Biao Di",island="Coconut Isle",reward="Soul Thorn Rod",type="Rod quest",objective="Three 1M+ kg Mutated Koid Whales, five Warbringer Sharks, five Dreadscale Groupers"},
-    {npc="Giang Lao",island="Bamboo Isle",reward="Shadowless Taiji Strike",type="NPC",objective="Consult live quest board"},
-    {npc="Giang Lao",island="Battlefield Isle",reward="Ascended Taiji Art",type="NPC",objective="Consult live quest board"},
-    {npc="Ha Dieu De",island="Frost Isle",reward="Sever The Gate v3",type="NPC",objective="Consult live quest board"},
-    {npc="Lao Ngo",island="Battlefield Isle",reward="Heartbreaker Cleave v2",type="NPC",objective="Consult live quest board"},
-    {npc="Blind Grand Angler",island="Battlefield Isle",reward="Astral Grand Art Zenith",type="NPC",objective="Consult live quest board"},
-    {npc="Bac Minh",island="Coconut Isle",reward="Bac Minh Orb",type="NPC",objective="Consult live quest board"},
-    {npc="Ticket Quest Giver",island="Beginning Isle",reward="Easy/Hard Tickets",type="Daily",objective="Replicated objectives; daily limit"},
-    {npc="Zeng Tianguo",island="Beginning Isle",reward="Repeatable quest",type="Repeatable",objective="Objectives vary; consult replicated quest"},
-    {npc="Chu Xin",island="Varies",reward="Divine Rod",type="Main",objective="Live quest details not verified"},
-    {npc="Yaxuo",island="Varies",reward="Unknown Rod",type="Main",objective="Live quest details not verified"},
+    -- autoKey points only to handlers that already exist in this build.
+    {id="SageDiamond",npc="Sage Yijiu",island="Battlefield Isle",reward="Diamond Rod",rewardType="Rod",type="Sage 1",objective="Catch 5 fish of at least 1,500,000 kg each",autoKey="autoSageAfterAmber",automation="Auto: accept / farm / turn-in attempt"},
+    {id="SagePhoenix",npc="Sage Yijiu",island="Battlefield Isle",reward="Phoenix Annihilation Art",rewardType="Skill",type="Sage 2",objective="Own Phoenix Strive Art v2; catch 250 fish; catch Scarlet Fish and Elder Scarlet Fish at 1.5M kg in Bamboo Thunderstorm",automation="Track only: later Sage stage not implemented"},
+    {id="SageFivefold",npc="Sage Yijiu",island="Battlefield Isle",reward="Fivefold Ascension",rewardType="Skill",type="Sage 3",objective="Catch a 2M kg Draconic Koi; own Sever The Gate v3; catch 10 fish of 1M kg",automation="Track only: later Sage stage not implemented"},
+    {id="SageTenfold",npc="Sage Yijiu",island="Battlefield Isle",reward="Tenfold Convergence",rewardType="Skill",type="Sage 4",objective="Catch a 6M kg Rainbow Dragon Fish; use Fivefold Ascension 50 times",automation="Track only: later Sage stage not implemented"},
+    {id="SageOneHook",npc="Sage Yijiu",island="Battlefield Isle",reward="One Hook Dominance",rewardType="Skill",type="Sage 5",objective="Catch a 5M kg Frost Kingfish and 6.5M kg Frost Queen Fish; use Tenfold Convergence 100 times",automation="Track only: later Sage stage not implemented"},
+    {id="CryoGravity",npc="Biao Di",island="Frost Isle",reward="Cryo Gravity Rod",rewardType="Rod",type="Rod quest",objective="100 Frost catches; two 1M+ kg Primordial Kunfish Overlords; four Primordial Kunfish",automation="Track only: seller quest dialogue not verified"},
+    {id="SoulThorn",npc="Biao Di",island="Coconut Isle",reward="Soul Thorn Rod",rewardType="Rod",type="Rod quest",objective="Three 1M+ kg Mutated Koi Whales; five Warbringer Sharks; five Dreadscale Groupers",automation="Track only: seller quest dialogue not verified"},
+    {id="GiangBamboo",npc="Giang Lao",island="Bamboo Isle",reward="Shadowless Taiji Strike",rewardType="Skill",type="NPC quest",objective="Quest objectives are server-defined; inspect live quest module",automation="Track only: live dialogue not mapped"},
+    {id="GiangBattlefield",npc="Giang Lao",island="Battlefield Isle",reward="Ascended Taiji Art",rewardType="Skill",type="NPC quest",objective="Quest objectives are server-defined; inspect live quest module",automation="Track only: live dialogue not mapped"},
+    {id="HaDieuDe",npc="Ha Dieu De",island="Frost Isle",reward="Sever The Gate v3",rewardType="Skill",type="NPC quest",objective="Quest objectives are server-defined; inspect live quest module",automation="Track only: live dialogue not mapped"},
+    {id="LaoNgo",npc="Lao Ngo",island="Battlefield Isle",reward="Heartbreaker Cleave v2",rewardType="Skill",type="NPC quest",objective="Quest objectives are server-defined; inspect live quest module",automation="Track only: live dialogue not mapped"},
+    {id="BlindGrandAngler",npc="Blind Grand Angler",island="Battlefield Isle",reward="Astral Grand Art Zenith",rewardType="Skill",type="NPC quest",objective="Quest objectives are server-defined; inspect live quest module",automation="Track only: live dialogue not mapped"},
+    {id="BacMinh",npc="Bac Minh",island="Coconut Isle",reward="Bac Minh Orb",rewardType="Orb",type="NPC quest",objective="Quest objectives are server-defined; inspect live quest module",automation="Track only: live dialogue not mapped"},
+    {id="TicketQuest",npc="Ticket Quest Giver",island="Beginning Isle",reward="Easy / Hard Tickets",rewardType="Ticket",type="Daily",objective="Complete the selected daily ticket quest; daily limit applies",autoKey="autoTicketQuests",automation="Auto: accept / progress-check / turn-in attempt"},
+    {id="ZengRepeatable",npc="Zeng Tianguo",island="Beginning Isle",reward="Variable server-defined reward",rewardType="Other",type="Repeatable",objective="Objectives and reward are server-defined; turn in only when replicated goals are complete",autoKey="autoZengQuest",automation="Auto: accept / progress-check / turn-in attempt"},
+    {id="DailyClaims",npc="Daily Quest System",island="Any",reward="Server-defined daily reward",rewardType="Daily",type="Daily claim",objective="Claims only already-completed daily objectives; does not complete them",autoKey="autoDailyQuest",automation="Auto: claim completed rewards only"},
+    {id="ChuXinDivine",npc="Chu Xin",island="Varies",reward="Divine Rod",rewardType="Rod",type="Main quest",objective="Public rod index lists this as a Chu Xin quest reward; live steps not verified",automation="Track only: live dialogue not mapped"},
+    {id="YaxuoUnknown",npc="Yaxuo",island="Varies",reward="Unknown Rod",rewardType="Rod",type="Main quest",objective="Public rod index lists an Unknown Rod; exact reward name and live steps need in-game confirmation",automation="Track only: reward details uncertain"},
+    {id="SambaQuest",npc="Samba / Samba Quest NPC",island="New update area",reward="Nautilus Dance; Samba Charge; Centerpiece Samba; Wavebreaker; Samba character unlock (requires Nautilus Dance)",rewardType="Skill",type="Weekly update",objective="Samba questline from the 2026-10-30 update; live objectives and NPC dialogue not yet verified",automation="New: track only until live quest data is mapped",source="User-provided Weekly UPD log"},
+    {id="HalloweenEvent",npc="Halloween Event NPC",island="Event location",reward="Cursed Lantern Rod skin",rewardType="Seasonal",type="Seasonal event",objective="Halloween NPC event from the 2026-10-30 update; live objectives and expiry not yet verified",automation="New: track only until live quest data is mapped",source="User-provided Weekly UPD log"},
+    {id="PureGoldenRodInfo",npc="Rod Seller / unknown",island="Unknown",reward="Pure Golden Rod",rewardType="Rod",type="New rod info",objective="New rod announced in the 2026-10-30 update; not confirmed as a quest reward or its acquisition route",automation="Info only: not listed as a confirmed quest",source="User-provided Weekly UPD log"},
 }
 local CRAFT_PLAN = {
     ["Heavenpiercer Rod"] = {
@@ -1888,6 +1893,7 @@ local function ticketQuestTick()
                 questTracker.ticketStatus="Daily ticket limit reached (paused)"
                 state.autoTicketQuests=false
                 if callbacks.autoTicketQuests then callbacks.autoTicketQuests() end
+                if hub.refreshQuestPicker then hub.refreshQuestPicker() end
                 return
             end
         end
@@ -1980,6 +1986,49 @@ local function sideQuestStatus()
     end
     return ("Active main quests %d (verified finished %d): %s"):format(total,done,table.concat(activeNames,", "))
 end
+local function discoverLiveQuestModules()
+    local info=ReplicatedStorage:FindFirstChild("Info")
+    local defs=info and info:FindFirstChild("MainQuest")
+    if not defs then return nil,"ReplicatedStorage.Info.MainQuest is not replicated" end
+    local found={}
+    local function rewardHint(value,depth)
+        if depth>3 or type(value)~="table" then return nil end
+        for key,item in pairs(value) do
+            local keyText=fold(key)
+            if keyText:find("reward",1,true) or keyText=="prize" or keyText=="item" then
+                if type(item)=="string" and item~="" then return item end
+                if type(item)=="table" then
+                    for _,nested in pairs(item) do
+                        if type(nested)=="string" and nested~="" then return nested end
+                    end
+                end
+            end
+            if type(item)=="table" then
+                local nested=rewardHint(item,depth+1)
+                if nested then return nested end
+            end
+        end
+        return nil
+    end
+    for _,module in ipairs(defs:GetChildren()) do
+        if module:IsA("ModuleScript") then
+            local ok,rows=pcall(require,module)
+            local objectiveCount=(ok and type(rows)=="table") and #rows or 0
+            local reward=module:GetAttribute("Reward")
+            if type(reward)~="string" or reward=="" then
+                reward=(ok and type(rows)=="table") and rewardHint(rows,0) or nil
+            end
+            table.insert(found,{
+                name=module.Name,
+                objectiveCount=objectiveCount,
+                reward=(type(reward)=="string" and reward~="") and reward or "Not exposed by live objective module",
+                readable=ok and type(rows)=="table",
+            })
+        end
+    end
+    table.sort(found,function(a,b) return a.name:lower()<b.name:lower() end)
+    return found
+end
 local function questTick()
     if not state.autoQuests then
         questTracker.status="OFF"
@@ -2068,7 +2117,7 @@ local function tpMerchant(kind)
     return teleportTo(part.CFrame*CFrame.new(0,0,-7),kind.." merchant")
 end
 
-return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
+return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, discoverLiveQuestModules=discoverLiveQuestModules, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
 end)()
 
 function hub.armAutoRoute()
@@ -2223,7 +2272,7 @@ local title = make("TextLabel", header, {
     Position = UDim2.fromOffset(12, 5), Size = UDim2.new(1, -58, 0, 21),
 })
 local headerSubtitle = make("TextLabel", header, {
-    BackgroundTransparency = 1, Text = "HEAVYWEIGHT  /  2.5", TextXAlignment = Enum.TextXAlignment.Left,
+    BackgroundTransparency = 1, Text = "HEAVYWEIGHT  /  2.6", TextXAlignment = Enum.TextXAlignment.Left,
     Font = Enum.Font.GothamMedium, TextSize = 9, TextColor3 = colors.muted,
     Position = UDim2.fromOffset(12, 26), Size = UDim2.new(1, -58, 0, 13),
 })
@@ -2526,7 +2575,6 @@ toggle(levelPage,"Auto route based on equipped rod Power","autoRoute")
 toggle(levelPage,"Auto face sea before casting","autoSeaFacing")
 toggle(levelPage,"Auto shop one best rod per island (UI)","autoBuyRod")
 toggle(levelPage,"Auto claim eligible free codes","autoCodes")
-toggle(levelPage,"Auto claim completed daily quests","autoDailyQuest")
 toggle(levelPage,"Favorite rare fish before selling","autoFavorite")
 toggle(levelPage,"FAST SELL (will sell non-favorites)","fastSell",function(v)
     if v then notify("FAST SELL ON: rare catches can be sold! Turn OFF to protect them.") end
@@ -2576,70 +2624,304 @@ action(levelPage,"RECHECK LEVEL/ROD NOW",function()
     notify("Level "..tostring(p.level or "?").."; Rod "..tostring(p.rod).."; Power "..tostring(pow or "?").."; Cash "..tostring(p.cash or "?"))
 end)
 
--- Quests are independent from Auto Level and Auto Sell.
-section(questPage,"Verified quest automation / server progress")
-local questHUD=make("TextLabel",questPage,{
+-- Quest selection board: multi-select only enables handlers that are implemented.
+-- Other catalog entries remain visible as TRACK ONLY until live dialogue is verified.
+local function buildQuestUI()
+section(questPage,"Quest automation / selected questlines")
+hub.questHUD=make("TextLabel",questPage,{
     BackgroundColor3=colors.panel,TextColor3=colors.accent,
     Font=Enum.Font.Gotham,TextSize=compact and 10 or 11,
     Text="Quest engine OFF",TextWrapped=true,
     TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
-    Size=UDim2.new(1,-4,0,99),
+    Size=UDim2.new(1,-4,0,74),
 })
-round(questHUD,7)
+round(hub.questHUD,7)
 toggle(questPage,"AUTO QUESTS (master, separate)","autoQuests",function(v)
-    notify(v and "Quest engine on; NPC/objective detection is best-effort." or "Quest engine OFF")
+    notify(v and "Quest selector enabled; only selected supported handlers will run." or "Quest engine OFF")
 end)
-toggle(questPage,"After Amber: Sage -> Diamond Rod","autoSageAfterAmber")
-toggle(questPage,"Auto ticket quests (verified remote)","autoTicketQuests")
-toggle(questPage,"Auto Zeng repeatable (verified remote)","autoZengQuest")
-toggle(questPage,"Claim completed daily quest rewards","autoDailyQuest")
-action(questPage,"TICKET MODE: Easy",function(btn)
-    state.ticketQuestMode=state.ticketQuestMode=="Easy" and "Hard" or "Easy"
-    btn.Text="TICKET MODE: "..state.ticketQuestMode
+
+local QUEST_FILTERS={"All rewards","Rods","Skills","Orbs","Tickets","Seasonal","Daily / Other"}
+local questFilter="All rewards"
+local liveQuestEntries={}
+local questFilterMenuOpen=false
+local questPickerOpen=false
+local function questFilterMatches(entry)
+    if questFilter=="All rewards" then return true end
+    local kind=tostring(entry.rewardType or "Unknown")
+    if questFilter=="Rods" then return kind=="Rod" or kind=="Rod Skin" end
+    if questFilter=="Skills" then return kind=="Skill" end
+    if questFilter=="Orbs" then return kind=="Orb" end
+    if questFilter=="Tickets" then return kind=="Ticket" end
+    if questFilter=="Seasonal" then return kind=="Seasonal" or kind=="Rod Skin" end
+    return kind=="Daily" or kind=="Other" or kind=="Unknown"
+end
+hub.questSelectedCount=function()
+    local count=0
+    for _,entry in ipairs(ext.QUESTRUN_CATALOG) do
+        if entry.autoKey and state[entry.autoKey] then count=count+1 end
+    end
+    return count
+end
+local filterRow=rowBase(questPage,32)
+make("TextLabel",filterRow,{
+    BackgroundTransparency=1,Text="REWARD TYPE",TextColor3=colors.muted,
+    Font=Enum.Font.GothamMedium,TextSize=9,TextXAlignment=Enum.TextXAlignment.Left,
+    Position=UDim2.fromOffset(9,0),Size=UDim2.new(0.42,0,1,0),
+})
+local filterButton=make("TextButton",filterRow,{
+    BackgroundColor3=colors.row,TextColor3=colors.white,Font=Enum.Font.GothamMedium,
+    TextSize=9,Text="All rewards  v",BorderSizePixel=0,
+    Size=UDim2.fromOffset(132,24),Position=UDim2.new(1,-140,0.5,-12),
+})
+round(filterButton,5)
+local filterMenu=make("Frame",questPage,{
+    BackgroundColor3=colors.panel,BorderSizePixel=0,Visible=false,
+    Size=UDim2.new(1,-4,0,0),ClipsDescendants=true,
+})
+round(filterMenu,6);edge(filterMenu)
+local filterLayout=make("UIListLayout",filterMenu,{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder})
+make("UIPadding",filterMenu,{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})
+local function closeFilterMenu()
+    questFilterMenuOpen=false
+    filterMenu.Size=UDim2.new(1,-4,0,0)
+    filterMenu.Visible=false
+end
+for _,filterName in ipairs(QUEST_FILTERS) do
+    local option=make("TextButton",filterMenu,{
+        BackgroundColor3=colors.row,TextColor3=colors.white,Font=Enum.Font.GothamMedium,
+        TextSize=9,Text=filterName,BorderSizePixel=0,Size=UDim2.new(1,0,0,23),
+    })
+    round(option,4)
+    track(option.MouseButton1Click:Connect(function()
+        questFilter=filterName
+        filterButton.Text=filterName.."  v"
+        closeFilterMenu()
+        if hub.refreshQuestPicker then hub.refreshQuestPicker() end
+    end))
+end
+track(filterButton.MouseButton1Click:Connect(function()
+    questFilterMenuOpen=not questFilterMenuOpen
+    if questFilterMenuOpen then
+        filterMenu.Visible=true
+        filterMenu.Size=UDim2.new(1,-4,0,#QUEST_FILTERS*25+10)
+    else
+        closeFilterMenu()
+    end
+end))
+
+local pickerRow=rowBase(questPage,34)
+local pickerButton=make("TextButton",pickerRow,{
+    BackgroundTransparency=1,TextColor3=colors.white,Font=Enum.Font.GothamMedium,
+    TextSize=10,TextXAlignment=Enum.TextXAlignment.Left,
+    Text="SELECT QUESTLINES ("..hub.questSelectedCount().." selected)  v",
+    Position=UDim2.fromOffset(9,0),Size=UDim2.new(1,-18,1,0),BorderSizePixel=0,
+})
+local pickerPanel=make("Frame",questPage,{
+    BackgroundColor3=colors.panel,BorderSizePixel=0,Visible=false,
+    Size=UDim2.new(1,-4,0,0),ClipsDescendants=true,
+})
+round(pickerPanel,6);edge(pickerPanel)
+local pickerScroll=make("ScrollingFrame",pickerPanel,{
+    BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,
+    ScrollBarImageColor3=colors.accent,Size=UDim2.fromScale(1,1),
+    CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.None,
+})
+local pickerLayout=make("UIListLayout",pickerScroll,{Padding=UDim.new(0,4),SortOrder=Enum.SortOrder.LayoutOrder})
+make("UIPadding",pickerScroll,{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})
+local function updatePickerCaption()
+    pickerButton.Text="SELECT QUESTLINES ("..hub.questSelectedCount().." selected)  "..(questPickerOpen and "^" or "v")
+end
+local function makeQuestEntryRow(entry)
+    local row=make("Frame",pickerScroll,{
+        BackgroundColor3=colors.row,BorderSizePixel=0,Size=UDim2.new(1,-4,0,47),
+    })
+    round(row,5)
+    local name=make("TextLabel",row,{
+        BackgroundTransparency=1,TextColor3=colors.white,Font=Enum.Font.GothamMedium,
+        TextSize=9,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,
+        Text=entry.npc.."  /  "..entry.type,TextTruncate=Enum.TextTruncate.AtEnd,
+        Position=UDim2.fromOffset(7,3),Size=UDim2.new(1,-76,0,17),
+    })
+    local reward=make("TextLabel",row,{
+        BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,
+        TextSize=8,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,
+        Text=tostring(entry.rewardType or "Unknown"):upper().."  |  "..tostring(entry.reward or "Reward unknown"),
+        TextTruncate=Enum.TextTruncate.AtEnd,
+        Position=UDim2.fromOffset(7,21),Size=UDim2.new(1,-76,0,14),
+    })
+    local status=make("TextButton",row,{
+        BackgroundColor3=entry.autoKey and (state[entry.autoKey] and colors.accent or colors.panel) or colors.bg,
+        TextColor3=entry.autoKey and (state[entry.autoKey] and colors.bg or colors.muted) or colors.muted,
+        Font=Enum.Font.GothamBold,TextSize=8,BorderSizePixel=0,
+        Text=entry.autoKey and (state[entry.autoKey] and "ON" or "OFF") or "INFO",
+        Size=UDim2.fromOffset(48,22),Position=UDim2.new(1,-55,0.5,-11),
+    })
+    round(status,5)
+    track(status.MouseButton1Click:Connect(function()
+        if not entry.autoKey then
+            print("[KITKIT QUEST INFO] "..tostring(entry.npc).." | Reward: "..tostring(entry.reward)
+                .." | Objective: "..tostring(entry.objective).." | "..tostring(entry.automation))
+            notify((entry.reward or entry.npc).." - TRACK ONLY; details printed to console")
+            return
+        end
+        setState(entry.autoKey,not state[entry.autoKey])
+        status.Text=state[entry.autoKey] and "ON" or "OFF"
+        status.BackgroundColor3=state[entry.autoKey] and colors.accent or colors.panel
+        status.TextColor3=state[entry.autoKey] and colors.bg or colors.muted
+        updatePickerCaption()
+        notify(entry.type.." selection "..(state[entry.autoKey] and "enabled" or "disabled"))
+    end))
+    if not entry.autoKey then
+        track(row.InputBegan:Connect(function(input)
+            if input.UserInputType==Enum.UserInputType.MouseButton1 then
+                notify(entry.npc.." -> "..entry.reward.." | "..entry.automation)
+            end
+        end))
+    end
+end
+local function rebuildQuestPicker()
+    for _,child in ipairs(pickerScroll:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+    local entries={}
+    for _,entry in ipairs(ext.QUESTRUN_CATALOG) do
+        if questFilterMatches(entry) then table.insert(entries,entry) end
+    end
+    for _,entry in ipairs(liveQuestEntries) do
+        if questFilterMatches(entry) then table.insert(entries,entry) end
+    end
+    table.sort(entries,function(a,b)
+        local at=tostring(a.rewardType or "Unknown")..tostring(a.npc or "")
+        local bt=tostring(b.rewardType or "Unknown")..tostring(b.npc or "")
+        return at<bt
+    end)
+    for _,entry in ipairs(entries) do makeQuestEntryRow(entry) end
+    task.defer(function()
+        pickerScroll.CanvasSize=UDim2.fromOffset(0,pickerLayout.AbsoluteContentSize.Y+8)
+    end)
+    updatePickerCaption()
+end
+hub.refreshQuestPicker=rebuildQuestPicker
+track(pickerLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    pickerScroll.CanvasSize=UDim2.fromOffset(0,pickerLayout.AbsoluteContentSize.Y+8)
+end))
+track(pickerButton.MouseButton1Click:Connect(function()
+    questPickerOpen=not questPickerOpen
+    if questPickerOpen then
+        rebuildQuestPicker()
+        pickerPanel.Visible=true
+        pickerPanel.Size=UDim2.new(1,-4,0,188)
+    else
+        pickerPanel.Size=UDim2.new(1,-4,0,0)
+        pickerPanel.Visible=false
+    end
+    updatePickerCaption()
+end))
+rebuildQuestPicker()
+
+local function makeSingleChoiceDropdown(parent,label,options,getCurrent,onSelect)
+    local row=rowBase(parent,32)
+    make("TextLabel",row,{
+        BackgroundTransparency=1,Text=label,TextColor3=colors.muted,
+        Font=Enum.Font.GothamMedium,TextSize=9,TextXAlignment=Enum.TextXAlignment.Left,
+        Position=UDim2.fromOffset(9,0),Size=UDim2.new(0.42,0,1,0),
+    })
+    local button=make("TextButton",row,{
+        BackgroundColor3=colors.row,TextColor3=colors.white,
+        Font=Enum.Font.GothamMedium,TextSize=9,Text="",BorderSizePixel=0,
+        Size=UDim2.fromOffset(132,24),Position=UDim2.new(1,-140,0.5,-12),
+    })
+    round(button,5)
+    local menu=make("Frame",parent,{
+        BackgroundColor3=colors.panel,BorderSizePixel=0,Visible=false,
+        Size=UDim2.new(1,-4,0,0),ClipsDescendants=true,
+    })
+    round(menu,6);edge(menu)
+    local function refresh()
+        button.Text=tostring(getCurrent()).."  v"
+    end
+    local function close()
+        menu.Size=UDim2.new(1,-4,0,0)
+        menu.Visible=false
+    end
+    for _,optionName in ipairs(options) do
+        local option=make("TextButton",menu,{
+            BackgroundColor3=colors.row,TextColor3=colors.white,
+            Font=Enum.Font.GothamMedium,TextSize=9,Text=optionName,
+            BorderSizePixel=0,Size=UDim2.new(1,-8,0,23),
+        })
+        round(option,4)
+        track(option.MouseButton1Click:Connect(function()
+            onSelect(optionName)
+            refresh()
+            close()
+        end))
+    end
+    make("UIListLayout",menu,{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder})
+    make("UIPadding",menu,{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})
+    track(button.MouseButton1Click:Connect(function()
+        if menu.Visible then close() else
+            menu.Visible=true
+            menu.Size=UDim2.new(1,-4,0,#options*25+10)
+        end
+    end))
+    refresh()
+    return refresh
+end
+makeSingleChoiceDropdown(questPage,"TICKET DIFFICULTY",{"Easy","Hard"},function()
+    return state.ticketQuestMode
+end,function(value)
+    state.ticketQuestMode=value
+    notify("Ticket quest difficulty: "..value)
+end)
+
+action(questPage,"SCAN LIVE QUEST MODULES + REWARDS",function()
+    local modules,err=ext.discoverLiveQuestModules()
+    if not modules then notify(err or "Live quest modules unavailable");return end
+    liveQuestEntries={}
+    local known={}
+    for _,entry in ipairs(ext.QUESTRUN_CATALOG) do
+        known[tostring(entry.id or ""):lower()]=true
+        known[tostring(entry.npc or ""):lower()]=true
+    end
+    for _,module in ipairs(modules) do
+        if not known[module.name:lower()] then
+            table.insert(liveQuestEntries,{
+                id="Live_"..module.name,npc="Live quest: "..module.name,
+                island="Live data",reward=module.reward,rewardType="Unknown",
+                type="Live module",objective=tostring(module.objectiveCount).." objective rows",
+                automation="Track only: module discovered, but NPC dialogue / reward handler is not verified",
+            })
+        end
+    end
+    rebuildQuestPicker()
+    notify("Scanned "..#modules.." live quest modules; "..#liveQuestEntries.." additional entries added. Unknown rewards stay marked unknown.")
 end)
 action(questPage,"TP TO BATTLEFIELD SAGE",function()
     local npc=ext.findQuestNPC("sage","Battlefield Isle")
     hub.manualTravelUntil=os.clock()+65
     teleportTo(npc and npc.CFrame*CFrame.new(0,0,-7) or cframeIsland("Battlefield Isle"),"Sage Yijiu")
 end)
-action(questPage,"READ SERVER QUEST STATUS",function()
-    local out={"Sage: "..ext.questTracker.sage,"Ticket: "..ext.questTracker.ticketStatus,
-        "Zeng: "..ext.questTracker.zengStatus,ext.sideQuestStatus()}
+action(questPage,"READ SELECTED QUEST STATUS",function()
+    local out={"Master: "..tostring(state.autoQuests),"Sage: "..ext.questTracker.sage,
+        "Ticket: "..ext.questTracker.ticketStatus,"Zeng: "..ext.questTracker.zengStatus,ext.sideQuestStatus()}
     for _,line in ipairs(out) do print("[KITKIT QUEST] "..line) end
-    notify("Server quest status printed to executor console")
+    notify("Selected quest status printed to executor console")
 end)
-action(questPage,"LIST LIVE QUEST MODULES (FROM GAME)",function()
-    local info=ReplicatedStorage:FindFirstChild("Info")
-    local defs=info and info:FindFirstChild("MainQuest")
-    if not defs then
-        notify("Game has not replicated Info.MainQuest; quest catalog unavailable")
-        return
-    end
-    local n=0
-    for _,mod in ipairs(defs:GetChildren()) do
-        if mod:IsA("ModuleScript") then
-            n=n+1
-            local ok,rows=pcall(require,mod)
-            local objectives=(ok and type(rows)=="table") and #rows or "?"
-            print(("[KITKIT LIVE QUEST %03d] %s | objective definitions: %s")
-                :format(n,mod.Name,tostring(objectives)))
-        end
-    end
-    notify("Read "..n.." live quest definitions; see executor console (not all auto-completable).")
-end)
-section(questPage,"Known quest catalog (reference, not all automated)")
-make("TextLabel",questPage,{
-    Text="Verified automated: completed Daily claims, Ticket quests and Zeng dialogue. Sage Diamond: travel/farm/accept/turn-in attempts; reward confirmation via owned rod. Other NPCs listed for reference until their live dialogue is known.",
-    TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,TextXAlignment=Enum.TextXAlignment.Left,
-    BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,TextSize=11,
-    Size=UDim2.new(1,-4,0,87),
-})
-action(questPage,"PRINT RESEARCHED QUEST INDEX (17)",function()
+action(questPage,"PRINT QUEST CATALOG + REWARDS",function()
     for i,q in ipairs(ext.QUESTRUN_CATALOG) do
-        print(("[KITKIT QUEST %02d] %s @ %s | %s | %s"):format(i,q.npc,q.island,q.reward,q.objective))
+        print(("[KITKIT QUEST %02d] %s @ %s | %s: %s | %s"):format(i,q.npc,q.island,q.rewardType,q.reward,q.automation))
     end
-    notify("Quest catalog printed to executor console; not all entries are executable.")
+    notify("Quest catalog and reward categories printed to executor console")
 end)
+make("TextLabel",questPage,{
+    Text="ON/OFF entries have a handler in this build. INFO entries show researched or newly announced rewards but are TRACK ONLY until live NPC dialogue and objectives are verified. Samba and Halloween details are from the latest update log; their requirements are not yet confirmed.",
+    TextWrapped=true,TextYAlignment=Enum.TextYAlignment.Top,TextXAlignment=Enum.TextXAlignment.Left,
+    BackgroundTransparency=1,TextColor3=colors.muted,Font=Enum.Font.Gotham,TextSize=9,
+    Size=UDim2.new(1,-4,0,66),
+})
+end
+buildQuestUI()
 
 section(craftPage,"Auto gather + craft (separate)")
 local craftHUD=make("TextLabel",craftPage,{
@@ -2963,7 +3245,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.5 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.6 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
@@ -3530,7 +3812,7 @@ task.spawn(function()
             headerSubtitle.Text="FISHING  /  "..barGuard.status
             headerSubtitle.TextColor3=colors.gold
         else
-            headerSubtitle.Text="HEAVYWEIGHT  /  2.5"
+            headerSubtitle.Text="HEAVYWEIGHT  /  2.6"
             headerSubtitle.TextColor3=colors.muted
         end
         levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -3538,8 +3820,9 @@ task.spawn(function()
             .."\nPower "..tostring(power or "?").." | "..tostring(p.cash or "?").." Cash"
             .." | "..string.format("%.1f",gainRate).." Lv/h"
         local suggested=nextRodSuggestion(p)
-        questHUD.Text="Master "..(state.autoQuests and "ON" or "OFF")
-            .." | Sage: "..ext.questTracker.sage
+        hub.questHUD.Text="Master "..(state.autoQuests and "ON" or "OFF")
+            .." | Selected: "..hub.questSelectedCount()
+            .."\nSage: "..ext.questTracker.sage
             .."\nTicket: "..ext.questTracker.ticketStatus
             .."\nZeng: "..ext.questTracker.zengStatus
             .."\nLive: "..ext.questTracker.side
@@ -3568,7 +3851,7 @@ task.spawn(function()
     end
 end)
 
-report("KITKIT v2.5 ready. Click the small K icon or press K to open the menu.")
+report("KITKIT v2.6 ready. Click the small K icon or press K to open the menu.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
