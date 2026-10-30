@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.1 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.2 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, unknown purchases, auto-craft, paid summon or auto-roll calls.
 AUTO LEVEL is a best-effort rod-aware farming assistant, NOT an XP/level bypass.
@@ -73,6 +73,7 @@ local pendingSellUntil = 0
 local lastCast = 0
 local lastEquipAttempt = 0
 local lastReel = 0
+local reelRequests = 0
 local lastSkill = 0
 local lastSell = os.clock()
 local lastBossTry = 0
@@ -174,6 +175,129 @@ local function minigame()
     local fg = main and main:FindFirstChild("Fishing")
     return fg, (fg and fg:IsA("GuiObject") and fg.Visible == true) or false
 end
+-- Robust fishing-bar controller (v2.2).
+-- The game can continuously tween this UI object. A single Heartbeat assignment
+-- can be overwritten before the next rendered frame. Correct on changes and on
+-- three frame phases, while doing nothing when the feature is switched off.
+local BAR_CENTER = UDim2.new(0.5, 0, 0.5, 0)
+local barGuard = {
+    bar = nil, positionConnection = nil, changing = false,
+    status = "OFF", corrections = 0, positionEvents = 0, errors = 0,
+    lastCorrection = "none", lastError = "none", lastSeen = 0,
+    missingSince = nil, lastWarning = 0,
+}
+local function wantsBarLock()
+    return hub.running and (state.lockBar or state.autoEnzo or state.autoLong)
+end
+local function disconnectBarListener()
+    if barGuard.positionConnection then
+        pcall(function() barGuard.positionConnection:Disconnect() end)
+    end
+    barGuard.positionConnection = nil
+    barGuard.bar = nil
+    barGuard.changing = false
+end
+local function moveBarToCenter(bar, reason)
+    if not wantsBarLock() or not bar or not bar.Parent or barGuard.changing then return end
+    local _, active = minigame()
+    if not active then return end
+    local pos = bar.Position
+    if pos == BAR_CENTER then
+        barGuard.status = "LOCKED"
+        return
+    end
+    barGuard.changing = true
+    -- Cancel competing client tweens when supported, but do not let an
+    -- unavailable TweenPosition stop the direct fallback assignment.
+    pcall(function()
+        bar:TweenPosition(BAR_CENTER, Enum.EasingDirection.InOut, Enum.EasingStyle.Linear, 0, true)
+    end)
+    local ok, err = pcall(function()
+        bar.Position = BAR_CENTER
+    end)
+    barGuard.changing = false
+    if ok then
+        barGuard.corrections = barGuard.corrections + 1
+        barGuard.lastCorrection = tostring(reason) .. " (from " .. tostring(pos) .. ")"
+        barGuard.status = "LOCKED"
+    else
+        barGuard.errors = barGuard.errors + 1
+        barGuard.lastError = tostring(err)
+        barGuard.status = "ERROR"
+    end
+end
+local function monitorFishingBar()
+    if not wantsBarLock() then
+        barGuard.status = "OFF"
+        if barGuard.bar then disconnectBarListener() end
+        return
+    end
+    local fg, active = minigame()
+    if not active then
+        barGuard.status = "WAITING FOR FISH"
+        barGuard.missingSince = nil
+        if barGuard.bar and not barGuard.bar.Parent then disconnectBarListener() end
+        return
+    end
+    local frame = fg:FindFirstChild("BarFrame")
+    local bar = frame and frame:FindFirstChild("Bar")
+    if not bar or not bar:IsA("GuiObject") then
+        barGuard.status = "BAR OBJECT MISSING"
+        local now = os.clock()
+        if not barGuard.missingSince then barGuard.missingSince = now end
+        if now - barGuard.missingSince >= 4 and now - barGuard.lastWarning >= 25 then
+            barGuard.lastWarning = now
+            report("Bar guard cannot find Fishing.BarFrame.Bar. Copy diagnostics in Other tab.")
+        end
+        return
+    end
+    barGuard.missingSince = nil
+    barGuard.lastSeen = os.clock()
+    if bar ~= barGuard.bar then
+        disconnectBarListener()
+        barGuard.bar = bar
+        local ok, connection = pcall(function()
+            return bar:GetPropertyChangedSignal("Position"):Connect(function()
+                if not wantsBarLock() or barGuard.changing then return end
+                barGuard.positionEvents = barGuard.positionEvents + 1
+                moveBarToCenter(bar, "position event")
+            end)
+        end)
+        if ok then
+            barGuard.positionConnection = connection
+        else
+            barGuard.errors = barGuard.errors + 1
+            barGuard.lastError = tostring(connection)
+        end
+    end
+    moveBarToCenter(bar, "frame")
+end
+local function reelDiagnostics()
+    local b = barGuard.bar
+    local info = {
+        "ReelLockEnabled=" .. tostring(wantsBarLock()),
+        "ReelLockStatus=" .. barGuard.status,
+        "BarListenerBound=" .. tostring(barGuard.positionConnection ~= nil),
+        "BarCorrections=" .. tostring(barGuard.corrections),
+        "BarPositionEvents=" .. tostring(barGuard.positionEvents),
+        "BarErrors=" .. tostring(barGuard.errors),
+        "ReelRemoteRequests=" .. tostring(reelRequests),
+        "LastBarCorrection=" .. barGuard.lastCorrection,
+        "LastBarError=" .. barGuard.lastError,
+    }
+    if b and b.Parent then
+        local parent = b.Parent
+        local actualCenter = b.AbsolutePosition.X + b.AbsoluteSize.X / 2
+        local parentCenter = parent.AbsolutePosition.X + parent.AbsoluteSize.X / 2
+        table.insert(info, "BarPosition=" .. tostring(b.Position))
+        table.insert(info, "BarAnchorPoint=" .. tostring(b.AnchorPoint))
+        table.insert(info, "VisualOffsetFromParentCenterPx=" .. string.format("%.1f", actualCenter - parentCenter))
+        table.insert(info, "BarAbsoluteSize=" .. tostring(b.AbsoluteSize))
+        table.insert(info, "BarParentAbsoluteSize=" .. tostring(parent.AbsoluteSize))
+    end
+    return table.concat(info, "\n")
+end
+
 local function equipRod()
     local char = LocalPlayer.Character
     if not char then return end
@@ -605,8 +729,8 @@ local title = make("TextLabel", header, {
     Font = Enum.Font.GothamBold, TextSize = compact and 15 or 17, TextColor3 = colors.accent,
     Position = UDim2.fromOffset(14, 5), Size = UDim2.new(1, -107, 0, 24),
 })
-make("TextLabel", header, {
-    BackgroundTransparency = 1, Text = "v2.1   |   rod-aware auto level", TextXAlignment = Enum.TextXAlignment.Left,
+local headerSubtitle = make("TextLabel", header, {
+    BackgroundTransparency = 1, Text = "v2.2 | manual rod upgrades | bar guard", TextXAlignment = Enum.TextXAlignment.Left,
     Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = colors.muted,
     Position = UDim2.fromOffset(14, 28), Size = UDim2.new(1, -107, 0, 16),
 })
@@ -921,6 +1045,14 @@ action(levelPage,"RECHECK LEVEL/ROD NOW",function()
 end)
 
 section(fishPage, "Fishing automation")
+local reelStatusHUD = make("TextLabel", fishPage, {
+    BackgroundColor3 = colors.panel, TextColor3 = colors.accent,
+    Font = Enum.Font.GothamMedium, TextSize = compact and 10 or 11,
+    Text = "BAR GUARD: OFF | Corrections 0 | Reel requests 0",
+    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+    Size = UDim2.new(1, -4, 0, 38),
+})
+round(reelStatusHUD, 7)
 local masterBtn = action(fishPage, "START FULL AUTO FISHING (NO SELL)", function(btn)
     local enable = not state.autoCast
     for _, k in ipairs({"autoCast", "autoReel", "lockBar", "autoSkill", "slam", "charge", "rhythm", "phase2"}) do
@@ -936,7 +1068,7 @@ toggle(fishPage, "Auto cast", "autoCast", function(v)
     if v then setState("autoEnzo", false); setState("autoLong", false) end
 end)
 toggle(fishPage, "Auto reel + progression", "autoReel")
-toggle(fishPage, "Keep fishing bar centered", "lockBar")
+toggle(fishPage, "Keep fishing bar centered (triple guard)", "lockBar")
 toggle(fishPage, "Use equipped skills", "autoSkill")
 toggle(fishPage, "Perfect slam (event)", "slam")
 toggle(fishPage, "Auto charge (event)", "charge")
@@ -1129,11 +1261,12 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.1 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.2 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
         "FishingGUI="..tostring(select(2,minigame())),
+        reelDiagnostics(),
         "Known code attempts="..tostring((function() local n=0 for _ in pairs(codesAttempted) do n=n+1 end return n end)()),
         "Mode="..tostring(state.autoLevel).." State="..progressionStatus,
         "Data child keys="..table.concat(dataNames,", "),
@@ -1177,6 +1310,7 @@ function hub:Unload()
     for _, c in ipairs(self.connections) do
         pcall(function() c:Disconnect() end)
     end
+    disconnectBarListener()
     clearESP()
     for part, old in pairs(self.touched) do
         pcall(function() if part.Parent then part.CanCollide = old end end)
@@ -1441,9 +1575,15 @@ local function progressionTick()
     end
 end
 
-local function useFishingTools()
-    return state.autoReel or state.lockBar or state.autoEnzo or state.autoLong
-end
+-- Late render + simulation phases reduce the time a competing game tween
+-- can move the indicator. A property-change listener handles mid-frame edits.
+-- No server remotes are sent from these render callbacks.
+track(RunService.RenderStepped:Connect(function()
+    if hub.running then monitorFishingBar() end
+end))
+track(RunService.Stepped:Connect(function()
+    if hub.running then monitorFishingBar() end
+end))
 track(RunService.Heartbeat:Connect(function()
     if not hub.running then return end
     local now = os.clock()
@@ -1454,19 +1594,10 @@ track(RunService.Heartbeat:Connect(function()
     wasFishing = active
     local workingBoss = state.autoEnzo or state.autoLong
     if fg and active then
-        if (state.lockBar or workingBoss) then
-            local bf = fg:FindFirstChild("BarFrame")
-            local bar = bf and bf:FindFirstChild("Bar")
-            if bar and bar:IsA("GuiObject") then
-                local p = bar.Position
-                if p.X.Scale ~= 0.5 or p.Y.Scale ~= 0.5 then
-                    bar.Position = UDim2.new(0.5, 0, 0.5, 0)
-                end
-            end
-        end
-        if (state.autoReel or workingBoss) and now - lastReel >= 0.12 then
+        if state.lockBar or workingBoss then monitorFishingBar() end
+        if (state.autoReel or workingBoss) and now - lastReel >= 0.085 then
             lastReel = now
-            fire("UpdateFishProgression")
+            if fire("UpdateFishProgression") then reelRequests = reelRequests + 1 end
         end
         if (state.autoSkill or workingBoss) and char then handleSkill(fg, char, now) end
         if state.rhythm or workingBoss then handleRhythm(fg, now) end
@@ -1506,7 +1637,7 @@ track(RunService.Heartbeat:Connect(function()
     if state.noclip and char then
         for _, part in ipairs(char:GetDescendants()) do
             if part:IsA("BasePart") and part.CanCollide then
-                if hub.touched[part] == nil then hub.touched[part] = true end
+                if hub.touched[part] == nil then hub.touched[part] = part.CanCollide end
                 part.CanCollide = false
             end
         end
@@ -1598,6 +1729,19 @@ task.spawn(function()
             .." | "..weather.." | Boss "..b.count
         weatherLabel.Text="Current weather: "..weather
         statusBottom.Text=lastAction
+        reelStatusHUD.Text="BAR GUARD: "..barGuard.status
+            .." | Snaps "..barGuard.corrections
+            .." | Reel requests "..reelRequests
+        if state.autoLevel then
+            headerSubtitle.Text="v2.2 | LEVEL ACTIVE | "..barGuard.status
+            headerSubtitle.TextColor3=colors.accent
+        elseif state.autoCast or state.autoReel or state.lockBar then
+            headerSubtitle.Text="v2.2 | FISHING ACTIVE | "..barGuard.status
+            headerSubtitle.TextColor3=colors.gold
+        else
+            headerSubtitle.Text="v2.2 | idle | bar guard ready"
+            headerSubtitle.TextColor3=colors.muted
+        end
         levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
             .." | "..tostring(p.rod~="" and p.rod or "Rod unknown")
             .."\nPower "..tostring(power or "?").." | "..tostring(p.cash or "?").." Cash"
@@ -1610,7 +1754,7 @@ task.spawn(function()
     end
 end)
 
-notify("KITKIT HUB v2.1 loaded. Use LEVEL > START AUTO LEVEL TO 500. Purchases are MANUAL.")
+notify("KITKIT HUB v2.2 loaded. Use LEVEL > START AUTO LEVEL TO 500. Bar guard is upgraded; check Fish tab status.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
