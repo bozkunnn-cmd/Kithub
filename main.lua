@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.9.0 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.9.1 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
@@ -117,7 +117,7 @@ local favoriteAttempts = setmetatable({}, { __mode = "k" })
 local fishDecoder = nil
 local fishMetadata -- populated by the verified recipe engine (declared later)
 local isCraftIngredient -- populated by the verified recipe engine (declared later)
-local routeCooldownUntil = {}
+-- No automatic island downgrade cooldown: qualifying Power always advances.
 local progressionStatus = "Idle"
 local sellTracker = {status="Not attempted", attempts=0, confirmed=0, failed=0, pending=nil, lastResult=0,
     streak=0, buyerPhase="idle", buyerAt=0, lastBuyerTrip=0, returnCF=nil}
@@ -587,6 +587,8 @@ local ROD_POWER = {
     ["Thunder Thorn Rod"]=67, ["Soul Thorn Rod"]=75,
     ["Starlight Rod"]=83, ["Heavenpiercer Rod"]=100,
     ["Heaven Piercer Rod"]=100, ["Pure Diamond Rod"]=100,
+    ["Pure Golden Rod"]=100, ["Taoist Rod"]=100,
+    ["MaoShan Rod"]=105, ["Maoshan Rod"]=105,
 }
 local function itemModule(name)
     if type(name)~="string" or name=="" then return nil end
@@ -638,12 +640,10 @@ local function routeChoice(p)
             if power>=route.power then index=i end
         end
     end
-    -- Islands are selected by the equipped rod's Power, not an invented level-10 gate.
-    -- Rods for the NEXT island may be sold there before the current rod can fish there.
+    -- Fishing destination is based on the currently equipped rod's live Power.
+    -- Never demote to a lower island merely because RNG produced a dry spell:
+    -- if Power meets the next island gate, keep the route and diagnose the catch loop.
     if not power then return "Beginning Isle",nil,1 end
-    while index>1 and os.clock()<(routeCooldownUntil[LEVEL_ROUTE[index].name] or 0) do
-        index=index-1
-    end
     return LEVEL_ROUTE[index].name,power,index
 end
 -- Only the strongest practical cash-buyable target per island. No intermediate shop rods.
@@ -1346,7 +1346,9 @@ function hub.shopNeedsPause(p)
         if (rodShop.equipFailures or 0)<3 then
             return true,"Equip owned "..owned
         end
-        return false,nil -- UI cannot equip it; continue farming with a diagnostic
+        -- Do not silently keep fishing with an inferior equipped rod when a
+        -- stronger owned rod is available. Pause and ask for a manual equip.
+        return true,"Manual equip required: "..owned
     end
     local target=nextRodSuggestion(p)
     if target and p.cash and p.cash>=target.cost and not ownedRod(target.name,p)
@@ -3065,7 +3067,9 @@ function hub.routeReadyForCast(island)
         return false
     end
     local override=ext.activeFarmOverride()
-    if not state.autoRoute and not override then return true end
+    if state.stayIsland and not override then return true end
+    local autoLevelRoute=state.autoLevel and not state.stayIsland
+    if not state.autoRoute and not override and not autoLevelRoute then return true end
     if not state.autoLevel and not override then return true end
     if not hub.routeGate.ready or hub.routeGate.island~=island then return false end
     local _,root,hum=getChar()
@@ -3080,8 +3084,10 @@ function hub.routeReadyForCast(island)
     return true
 end
 function hub.routeTravelTick(now,island,force)
-    if not state.autoRoute and not force then
+    local autoLevelRoute=state.autoLevel and not state.stayIsland
+    if not state.autoRoute and not force and not autoLevelRoute then
         hub.routeGate.ready=true
+        hub.routeGate.island=island
         hub.routeGate.status="Auto route disabled"
         return
     end
@@ -3735,6 +3741,9 @@ action(levelPage,"QUICK START: LEVEL + SELL + SELECTED QUESTS",function()
 end,true)
 toggle(levelPage,"Auto route based on equipped rod Power","autoRoute",function(v)
     if v and state.stayIsland then setState("stayIsland",false) end
+    if not v and state.autoLevel and not state.stayIsland then
+        notify("Auto Level still follows Power progression. Use Stay Island to intentionally pin fishing to one island.")
+    end
 end)
 toggle(levelPage,"Auto face sea before casting","autoSeaFacing")
 toggle(levelPage,"Auto shop one best rod per island (UI)","autoBuyRod")
@@ -3773,8 +3782,17 @@ action(levelPage,"REDEEM ELIGIBLE FREE CODES (MANUAL)",function()
 end)
 action(levelPage,"RECHECK LEVEL/ROD NOW",function()
     local p=profile()
-    local _,pow=routeChoice(p)
-    notify("Level "..tostring(p.level or "?").."; Rod "..tostring(p.rod).."; Power "..tostring(pow or "?").."; Cash "..tostring(p.cash or "?"))
+    local route,pow=routeChoice(p)
+    local target=nextRodSuggestion(p)
+    notify("Level "..tostring(p.level or "?").."; Rod "..tostring(p.rod).."; Power "..tostring(pow or "?")
+        .."; route "..route.."; Cash "..tostring(p.cash or "?")
+        ..(target and ("; next rod "..target.name.." / "..target.power.." Power / "..target.cost.." Cash at "..target.island) or "; no next rod"))
+end)
+action(levelPage,"FORCE RECHECK ISLAND ROUTE",function()
+    local p=profile()
+    local route,pow=routeChoice(p)
+    hub.armAutoRoute()
+    notify("Route recalculated: "..route.." at equipped Power "..tostring(pow or "unknown")..". Teleport verification reset.")
 end)
 action(levelPage,"SCAN PURE GOLDEN / KRAKEN LIVE STATS",function()
     local lines={}
@@ -5048,9 +5066,14 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.9.0 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.9.1 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
+        "RouteDecision="..tostring(select(1,routeChoice(p)))
+            .." EquippedPower="..tostring(rodPower(p.rod))
+            .." BestOwned="..tostring(select(1,bestOwnedRod(p)))
+            .." BestOwnedPower="..tostring(select(2,bestOwnedRod(p))),
+        "NextRod="..(function() local t=nextRodSuggestion(p); return t and (t.name.." | Power="..tostring(t.power).." | Cost="..tostring(t.cost).." | Shop="..tostring(t.island)) or "none" end)(),
         "Bag="..tostring(count).."/"..tostring(maxCount),
         "FishingGUI="..tostring(select(2,minigame())),
         reelDiagnostics(),
@@ -5436,27 +5459,24 @@ local function progressionTick()
     else
         local _,nextIsland,required,nextTarget=hub.nextIslandGoal(p)
         if nextIsland and power<required then
-            progressionStatus=desired.." (Power "..power..") | Next "..nextIsland
-                .." needs "..required.." | "..(nextTarget and ("Save for "..nextTarget.name) or "Upgrade rod")
+            local targetText=nextTarget and ("Save for "..nextTarget.name.." ("..tostring(nextTarget.power).." Power, "
+                ..tostring(nextTarget.cost).." Cash) at "..tostring(nextTarget.island)) or "Upgrade rod"
+            progressionStatus=desired.." (equipped Power "..power..") | "..nextIsland
+                .." requires "..required.." Power | "..targetText
         else
             progressionStatus="Farming "..desired.." (Power "..power..")"
         end
     end
-    hub.routeTravelTick(now,desired,override~=nil)
-    -- If we've made no XP and caught nothing on a higher island, back off one
-    -- island temporarily. This avoids repeatedly failing catches on over-tier rods.
-    if not override and index>1 and now-lastCatchAt>155 then
-        routeCooldownUntil[desired]=now+360
-        local prev=LEVEL_ROUTE[index-1].name
-        notify("No catch/XP progress for 155s. Trying "..prev.." for 6 minutes.")
-        lastCatchAt=now
-    elseif not override and index==1 and now-lastCatchAt>180 then
-        progressionStatus="Stalled: check tutorial / rod / reel / inventory"
+    hub.routeTravelTick(now,desired,override~=nil or (state.autoLevel and not state.stayIsland))
+    -- A dry spell is not proof that the rod is underpowered. Keep the island
+    -- selected when its published Power gate is met; diagnose instead of
+    -- silently demoting the player and trapping progression in the prior isle.
+    if not override and now-lastCatchAt>155 then
+        progressionStatus="No catch/XP progress on "..desired.." for 155s; holding this Power-qualified route"
         if now-lastAutoHealthCheck>120 then
             lastAutoHealthCheck=now
-            notify("No XP/catches after 3 min. Check tutorial, rod purchase, and fishing GUI.")
+            notify("No catch/XP on "..desired..". KITKIT is holding the correct Power route instead of downgrading islands. Check rod, reel, bag and cast status.")
         end
-        -- do not force server remote spam or fabricate XP.
         lastCatchAt=now
     end
     local suggestion=nextRodSuggestion(p)
@@ -5724,7 +5744,7 @@ task.spawn(function()
             hub.ui.headerSubtitle.Text="FISHING  /  "..barGuard.status
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.gold
         else
-            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.0"
+            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.1"
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.muted
         end
         hub.ui.levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -5755,16 +5775,24 @@ task.spawn(function()
             merchantActive=merchantActive or available
         end
         hub.ui.roamingPopup.Visible=merchantActive and state.merchantAlerts
-        local nextRodLabel=suggested and (suggested.name.." ("..suggested.cost.." Cash"..(suggested.verifiedPrice and ", live)" or ", estimate; verify in shop)")) or "Complete"
+        local nextRodLabel=suggested and (suggested.name.." ("..suggested.power.." Power, "..suggested.cost.." Cash"..(suggested.verifiedPrice and ", live)" or ", estimate; verify in shop)")) or "Complete"
+        local routeNow,nextIsland,requiredPower,nextTarget=hub.nextIslandGoal(p)
+        local routeSummary="FISHING  /  "..tostring(routeNow or route)
+        if nextIsland and requiredPower then
+            routeSummary=routeSummary.."  |  NEXT ISLAND "..nextIsland.." AT "..requiredPower.." POWER"
+        end
+        local targetSummary=nextTarget and ("NEXT ROD  /  "..nextTarget.name.." - "..nextTarget.power.." POWER - "
+            ..nextTarget.cost.." CASH @ "..nextTarget.island) or "NEXT ROD  /  "..nextRodLabel
         hub.ui.routeHUD.Text="ROUTE  /  "..hub.routeGate.status
-            .."\n"..progressionStatus
+            .."\n"..routeSummary
+            .."\n"..targetSummary
             .."\nSHOP  /  "..rodShop.status
-            .."\nNEXT  /  "..nextRodLabel
+            .."\n"..progressionStatus
         task.wait(3)
     end
 end)
 
-report("KITKIT v2.9.0 ready. Skill library, character unlocks and manual Shadow offers loaded.")
+report("KITKIT v2.9.1 ready. Route progression no longer demotes on dry spells; next rod gates are explicit.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
