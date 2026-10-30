@@ -1,8 +1,8 @@
 --[[
-KITKIT HUB v2.9.3 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.9.4 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
-v2.9.3: scope fixes, faster route verification, guarded fishing loops, and lower default cast delay.
+v2.9.4: removes quest-route cast deadlock, improves quest tick responsiveness, and adds live skill-shop diagnostics.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
 Quest and crafting requests are subject to server verification and may fail.
 Rod buying uses game UI ONLY, targets one shop rod per island, and verifies ownership.
@@ -4656,6 +4656,33 @@ local function buildSkillsUI()
     end
     track(search:GetPropertyChangedSignal("Text"):Connect(rebuild))
     hub.refreshSkillIndex=rebuild
+    action(skillPage,"OPEN + SCAN LIVE LEARN SKILL MENU",function()
+        local mg=PlayerGui:FindFirstChild("MainGui")
+        local menu=mg and mg:FindFirstChild("Menu")
+        local learn=menu and menu:FindFirstChild("LearnSkill")
+        if not learn then
+            notify("LearnSkill menu is not replicated. Talk to Sage Yijiu once, then run this scan again.")
+            return
+        end
+        -- Toggle only the exact known menu frame; leave other menus alone.
+        learn.Visible=true
+        local parent=learn.Parent
+        while parent and parent~=mg do
+            if parent:IsA("GuiObject") then parent.Visible=true end
+            parent=parent.Parent
+        end
+        local count=0
+        for _,obj in ipairs(learn:GetDescendants()) do
+            if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+                local textValue=tostring(obj.Text or ""):gsub("%s+"," ")
+                if textValue~="" then
+                    print("[KITKIT SKILL SHOP] "..obj:GetFullName().." | "..textValue)
+                    count=count+1
+                end
+            end
+        end
+        notify("Learn Skill menu opened. Scanned "..count.." text controls; check executor console for exact shop structure. No purchase was made.")
+    end)
     action(skillPage,"PRINT FILTERED SKILL SOURCES",function()
         local q=search.Text:lower(); local n=0
         for _,entry in ipairs(ext.SKILL_SOURCE_CATALOG) do
@@ -5203,7 +5230,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.9.3 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.9.4 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "RouteDecision="..tostring(select(1,routeChoice(p)))
@@ -5706,12 +5733,10 @@ track(RunService.Heartbeat:Connect(function()
         local p=profile()
         local unknownRod=unverifiedUpdateRod(p.rod)
         local farmOverride=ext.activeFarmOverride()
-        local questRouteWaiting = state.autoQuests and (
-            (state.autoSageAfterAmber and not ext.diamondOwned() and ext.questTracker.sageRoute==nil)
-            or (state.autoTicketQuests and ext.questTracker.ticketRoute==nil)
-            or (state.autoZengQuest and ext.questTracker.zengRoute==nil))
-        local managedRouteWaiting = ((state.autoFarmMaterials or state.autoCraftRod) and not farmOverride)
-            or questRouteWaiting
+        -- A selected quest can be waiting for its prerequisite, NPC, or dialogue.
+        -- That must NOT stop ordinary Auto Level fishing: only an actual active
+        -- farm override changes the destination. Otherwise continue routeChoice(p).
+        local managedRouteWaiting = (state.autoFarmMaterials or state.autoCraftRod) and not farmOverride
         local island=farmOverride or routeChoice(p)
         local root=char:FindFirstChild("HumanoidRootPart")
         local shopPause,shopReason=hub.shopNeedsPause(p)
@@ -5719,17 +5744,7 @@ track(RunService.Heartbeat:Connect(function()
             lastCast=now
         elseif managedRouteWaiting then
             hub.routeGate.ready=false
-            if state.autoFarmMaterials or state.autoCraftRod then
-                hub.routeGate.status=ext.craftTracker.status or "Waiting for a matching material fish"
-            elseif state.autoSageAfterAmber and not ext.diamondOwned() then
-                hub.routeGate.status=ext.questTracker.sage or "Waiting for Sage route"
-            elseif state.autoTicketQuests then
-                hub.routeGate.status=ext.questTracker.ticketStatus or "Waiting for ticket quest route"
-            elseif state.autoZengQuest then
-                hub.routeGate.status=ext.questTracker.zengStatus or "Waiting for Zeng quest route"
-            else
-                hub.routeGate.status="Waiting for selected quest route"
-            end
+            hub.routeGate.status=ext.craftTracker.status or "Waiting for a matching material fish"
             lastCast=now
         elseif state.autoLevel and state.autoRoute and unknownRod then
             progressionStatus="Casting paused: unknown live Power for "..unknownRod
@@ -5896,7 +5911,7 @@ task.spawn(function()
             local scanned,scanError=pcall(ext.scanMerchants)
             if not scanned then report("Merchant scan issue: "..tostring(scanError)) end
         end
-        task.wait(3)
+        task.wait(1)
     end
 end)
 
@@ -5963,7 +5978,7 @@ task.spawn(function()
             hub.ui.headerSubtitle.Text="FISHING  /  "..barGuard.status
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.gold
         else
-            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.3"
+            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.4"
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.muted
         end
         hub.ui.levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -6015,7 +6030,7 @@ task.spawn(function()
     end
 end)
 
-report("KITKIT v2.9.3 ready. Progression roadmap and roaming merchant detection enabled. Route progression no longer demotes on dry spells; next rod gates are explicit.")
+report("KITKIT v2.9.4 ready. Quest routes no longer block normal Auto Level while waiting for a supported objective.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
