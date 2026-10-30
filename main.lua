@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.8.1 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.8.3 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
@@ -46,7 +46,7 @@ if type(env.KITKIT_HeavyweightFishing) == "table" and type(env.KITKIT_Heavyweigh
     pcall(function() env.KITKIT_HeavyweightFishing:Unload() end)
 end
 
-local hub = { running = true, connections = {}, esp = {}, touched = {}, originals = {}, manualTravelUntil=0, questManagedFlags={}, questAutomationChanging=false }
+local hub = { running = true, connections = {}, esp = {}, touched = {}, originals = {}, manualTravelUntil=0, questManagedFlags={}, craftManagedFlags={}, questAutomationChanging=false, craftAutomationChanging=false, managedFlagBaseline={}, trackedQuestIds={}, autoCraftOwnsMaterialFarm=false }
 env.KITKIT_HeavyweightFishing = hub
 
 local state = {
@@ -184,10 +184,52 @@ local function notify(msg)
 end
 local function setState(k, val)
     state[k] = val
-    if not hub.questAutomationChanging and hub.questManagedFlags then
-        hub.questManagedFlags[k] = nil
+    -- A direct user toggle takes ownership away from automation modes. This
+    -- prevents Auto Quest / Auto Craft from re-enabling or later disabling a
+    -- setting the user has explicitly changed.
+    if not hub.questAutomationChanging and not hub.craftAutomationChanging then
+        if hub.questManagedFlags then hub.questManagedFlags[k] = nil end
+        if hub.craftManagedFlags then hub.craftManagedFlags[k] = nil end
+        if hub.managedFlagBaseline then hub.managedFlagBaseline[k] = nil end
     end
     refreshCallbacks(k)
+end
+
+local MODE_FISHING_FLAGS = {"autoCast", "autoReel", "lockBar", "autoSkill", "slam", "charge", "rhythm", "phase2"}
+local function managedFlags(owner)
+    return owner == "quest" and hub.questManagedFlags or hub.craftManagedFlags
+end
+local function otherManagedFlags(owner)
+    return owner == "quest" and hub.craftManagedFlags or hub.questManagedFlags
+end
+function hub.enableManagedFishing(owner)
+    local flags = managedFlags(owner)
+    local changingKey = owner == "quest" and "questAutomationChanging" or "craftAutomationChanging"
+    for _, key in ipairs(MODE_FISHING_FLAGS) do
+        if not flags[key] and not otherManagedFlags(owner)[key] then
+            hub.managedFlagBaseline[key] = state[key] == true
+        end
+        flags[key] = true
+        hub[changingKey] = true
+        if not state[key] then setState(key, true) end
+        hub[changingKey] = false
+    end
+end
+function hub.releaseManagedFishing(owner)
+    local flags = managedFlags(owner)
+    local changingKey = owner == "quest" and "questAutomationChanging" or "craftAutomationChanging"
+    for key in pairs(flags) do
+        flags[key] = nil
+        if not otherManagedFlags(owner)[key] then
+            local wasAlreadyEnabled = hub.managedFlagBaseline[key] == true
+            if not wasAlreadyEnabled then
+                hub[changingKey] = true
+                if state[key] then setState(key, false) end
+                hub[changingKey] = false
+            end
+            hub.managedFlagBaseline[key] = nil
+        end
+    end
 end
 local function getChar()
     local c = LocalPlayer.Character
@@ -481,15 +523,42 @@ local function candidateValue(folder, names)
     end
     return nil
 end
+local function recursiveCandidateValue(folder, names, maxDepth)
+    if not folder then return nil end
+    local wanted = {}
+    for _, name in ipairs(names) do wanted[string.lower(name)] = true end
+    local function walk(parent, depth)
+        if not parent or depth > (maxDepth or 4) then return nil end
+        for _, child in ipairs(parent:GetChildren()) do
+            if child:IsA("ValueBase") and wanted[string.lower(child.Name)] then
+                local value = tonumber(child.Value)
+                if value ~= nil then return value end
+            end
+        end
+        for _, child in ipairs(parent:GetChildren()) do
+            if child:IsA("Folder") or child:IsA("Configuration") then
+                local value = walk(child, depth + 1)
+                if value ~= nil then return value end
+            end
+        end
+        return nil
+    end
+    return walk(folder, 1)
+end
 local function profile()
     local d = playerData()
     local stats = d and (d:FindFirstChild("Stats") or d:FindFirstChild("Statistics"))
+    local levelFolder = d and d:FindFirstChild("Level")
     local ls = LocalPlayer:FindFirstChild("leaderstats")
     local lvl = candidateValue(d, {"Level", "Lv", "PlayerLevel"})
+        or candidateValue(levelFolder, {"Level", "Lv", "PlayerLevel", "CurrentLevel", "LevelValue", "Value"})
+        or recursiveCandidateValue(levelFolder, {"Level", "Lv", "PlayerLevel", "CurrentLevel", "LevelValue"}, 4)
         or candidateValue(stats, {"Level", "Lv", "PlayerLevel"})
         or candidateValue(ls, {"Level", "Lv"})
         or candidateValue(LocalPlayer, {"Level", "Lv"})
     local xp = candidateValue(d, {"Exp", "EXP", "XP", "Experience"})
+        or candidateValue(levelFolder, {"Exp", "EXP", "XP", "Experience", "CurrentXP", "LevelXP"})
+        or recursiveCandidateValue(levelFolder, {"Exp", "EXP", "XP", "Experience", "CurrentXP", "LevelXP"}, 4)
         or candidateValue(stats, {"Exp", "EXP", "XP", "Experience"})
         or candidateValue(ls, {"Exp", "EXP", "XP"})
     local cash = candidateValue(d, {"Cash", "Money", "Coins"})
@@ -498,7 +567,7 @@ local function profile()
     local rodVal = d and d:FindFirstChild("FishingRod")
     local rodName = rodVal and rodVal:IsA("StringValue") and rodVal.Value or ""
     if rodName == "" then rodName = tostring((d and d:GetAttribute("FishingRod")) or "") end
-    return {level=lvl, xp=xp, cash=cash, rod=rodName, data=d}
+    return {level=lvl, xp=xp, cash=cash, rod=rodName, data=d, levelFolder=levelFolder}
 end
 
 -- Conservative community rod-power reference; for actual ownership use server data.
@@ -1563,7 +1632,7 @@ end
 local ext=(function()
 -- v2.4 progression and quest/craft engine. Only server-replicated data may
 -- confirm purchases, quests or crafts. Research URLs are in the patch notes.
-local questTracker = {status="Idle", sage="waiting", sageRoute=nil, nextAt=0,
+local questTracker = {status="Idle", sage="waiting", sageRoute=nil, ticketRoute=nil, zengRoute=nil, nextAt=0,
     lastInteract=-math.huge, lastTicket=-math.huge, lastUI=-math.huge, ticketStatus="Idle", side="Idle",
     lastDaily=0, pausedUntil=0, lastSageVisit=0, lastProgress="", lastZeng=-math.huge, zengStatus="OFF", routeLockUntil=0}
 local craftTracker = {status="Idle", route=nil, fish=nil, lastAt=-math.huge,
@@ -1589,7 +1658,7 @@ local QUESTRUN_CATALOG = {
     {id="TicketQuest",npc="Ticket Quest Giver",island="Beginning Isle",reward="Easy / Hard Tickets",rewardType="Ticket",type="Daily",objective="Complete the selected daily ticket quest; daily limit applies",autoKey="autoTicketQuests",automation="Auto: accept / progress-check / turn-in attempt"},
     {id="ZengRepeatable",npc="Zeng Tianguo",island="Beginning Isle",reward="Variable server-defined reward",rewardType="Other",type="Repeatable",objective="Objectives and reward are server-defined; turn in only when replicated goals are complete",autoKey="autoZengQuest",automation="Auto: accept / progress-check / turn-in attempt"},
     {id="DailyClaims",npc="Daily Quest System",island="Any",reward="Completed daily quest rewards",rewardType="Daily",type="Daily claim",objective="Claims only already-completed daily objectives; does not complete them",autoKey="autoDailyQuest",automation="Auto: claim completed rewards only"},
-    {id="DailyLoginReward",npc="Daily Reward System",island="Any",reward="Daily login reward",rewardType="Daily",type="Daily login",objective="Daily login cycle and claim event are not verified in the current public source set",automation="INFO only: live claim event / eligibility not verified"},
+    {id="DailyLoginReward",npc="Daily Reward System",island="Any",reward="Daily login reward",rewardType="Daily",type="Daily login",objective="Daily login cycle and claim event are not verified in the current public source set",automation="TRACK ONLY: live claim event / eligibility not verified"},
     {id="ChuXinDivine",npc="Chu Xin",island="Varies",reward="Divine Rod",rewardType="Rod",type="Main quest",objective="Public rod index lists this as a Chu Xin quest reward; live steps not verified",automation="Track only: live dialogue not mapped"},
     {id="YaxuoUnknown",npc="Yaxuo",island="Varies",reward="Unknown Rod",rewardType="Rod",type="Main quest",objective="Public rod index lists an Unknown Rod; exact reward name and live steps need in-game confirmation",automation="Track only: reward details uncertain"},
     {id="SambaQuest",npc="Samba / Samba Quest NPC",island="New update area",reward="Nautilus Dance; Samba Charge; Centerpiece Samba; Wavebreaker; Samba character unlock (requires Nautilus Dance)",rewardType="Skill",type="Weekly update",objective="Samba questline from the 2026-10-30 update; live objectives and NPC dialogue not yet verified",automation="New: track only until live quest data is mapped",source="User-provided Weekly UPD log"},
@@ -1699,15 +1768,39 @@ isCraftIngredient = function(item)
     return ingredientCache.names[name]==true
 end
 local function currentWeather()
-    return tostring(workspace:GetAttribute("Weather") or "Unknown")
+    local value = workspace:GetAttribute("Weather")
+    if value == nil then
+        local worldWeather = workspace:FindFirstChild("Weather")
+        if worldWeather and worldWeather:IsA("ValueBase") then value = worldWeather.Value end
+    end
+    if value == nil then
+        local data = playerData()
+        local dataWeather = data and data:FindFirstChild("Weather")
+        if dataWeather and dataWeather:IsA("ValueBase") then value = dataWeather.Value end
+    end
+    return tostring(value or "Unknown")
 end
 local function matchingWeather(got,needed)
     local a,b=fold(got),fold(needed)
-    if b=="windy" then return a:find("wind",1,true)~=nil end
-    if b=="snowy" then return a:find("snow",1,true)~=nil end
-    if b=="foggy" then return a:find("fog",1,true)~=nil or a:find("mist",1,true)~=nil end
-    if b=="blazingsun" then return a:find("blazing",1,true)~=nil end
-    return a==b
+    if a=="" or b=="" then return false end
+    if a==b or a:find(b,1,true) or b:find(a,1,true) then return true end
+    local groups = {
+        {"thunder", "storm", "lightning"},
+        {"rain", "shower"},
+        {"snow", "frost", "blizzard"},
+        {"fog", "mist"},
+        {"wind", "tornado"},
+        {"sun", "clear", "blazing"},
+    }
+    for _, group in ipairs(groups) do
+        local wantedGroup, gotGroup = false, false
+        for _, word in ipairs(group) do
+            if b:find(word,1,true) then wantedGroup=true end
+            if a:find(word,1,true) then gotGroup=true end
+        end
+        if wantedGroup then return gotGroup end
+    end
+    return false
 end
 local ownedBaitCount, parseRequirements, liveCraftModule
 local function knownFishForWeather()
@@ -1855,7 +1948,7 @@ local function scanLiveRodData()
     return rows,nil
 end
 local function maybeCraftBait(name)
-    if not state.autoCraftBait or not state.protectMaterials then return false end
+    if not (state.autoCraftBait or state.autoCraftRod) or not state.protectMaterials then return false end
     if craftTracker.baitPending then
         craftTracker.status="Waiting to verify bait craft: "..craftTracker.baitPending.name
         return false
@@ -2334,8 +2427,69 @@ local function currentTicketQuest()
     end
     return nil
 end
+local function questObjectiveText(q)
+    if not q then return "" end
+    local parts = {}
+    local function collect(value, depth)
+        if depth > 4 then return end
+        if type(value) == "string" or type(value) == "number" then
+            parts[#parts + 1] = tostring(value)
+        elseif type(value) == "table" then
+            for _, child in pairs(value) do collect(child, depth + 1) end
+        end
+    end
+    local info = ReplicatedStorage:FindFirstChild("Info")
+    local mainQuest = info and info:FindFirstChild("MainQuest")
+    local module = mainQuest and (mainQuest:FindFirstChild(q.Name)
+        or mainQuest:FindFirstChild("Zeng Tianguo")
+        or mainQuest:FindFirstChild("Zeng Tianguo Quest"))
+    if module and module:IsA("ModuleScript") then
+        local ok, rows = pcall(require, module)
+        if ok then collect(rows, 0) end
+    end
+    local objective = q:FindFirstChild("Objective")
+    if objective then
+        for _, child in ipairs(objective:GetChildren()) do
+            if child:IsA("ValueBase") then
+                parts[#parts + 1] = child.Name .. " " .. tostring(child.Value)
+            end
+        end
+    end
+    for _, child in ipairs(q:GetChildren()) do
+        if child:IsA("StringValue") then parts[#parts + 1] = child.Name .. " " .. child.Value end
+    end
+    return table.concat(parts, " "):lower()
+end
+local function questObjectiveIsland(q, text)
+    text = text or questObjectiveText(q)
+    for _, route in ipairs(LEVEL_ROUTE) do
+        if text:find(fold(route.name), 1, true) then return route.name end
+    end
+    return nil
+end
+local function genericCatchOrSkillObjective(q)
+    local text = questObjectiveText(q)
+    local explicitIsland = questObjectiveIsland(q, text)
+    if text:find("use any skill", 1, true) or text:find("skill for 100", 1, true) then
+        return true, "skill-use objective", explicitIsland
+    end
+    if text:find("catch any fish", 1, true) or text:find("catch fish", 1, true)
+        or text:match("catch%s+%d+%s+fish") or text:match("catch%s+%d+%s+fishes") then
+        return true, "general catch objective", explicitIsland
+    end
+    -- A fish-specific objective is routable only if the server module also
+    -- names an island. Never guess the island for an unknown species.
+    if explicitIsland and (text:find("catch", 1, true) or text:find("fish", 1, true)) then
+        return true, "specific fish objective at "..explicitIsland, explicitIsland
+    end
+    return false, text, nil
+end
+
 local function ticketQuestTick()
-    if not (state.autoQuests and state.autoTicketQuests) then return end
+    if not (state.autoQuests and state.autoTicketQuests) then
+        questTracker.ticketRoute=nil
+        return
+    end
     if questTracker.sageRoute then return end
     if os.clock()-questTracker.lastTicket<20 then return end
     local dialog=PlayerGui:FindFirstChild("MainGui")
@@ -2360,8 +2514,20 @@ local function ticketQuestTick()
     local q=currentTicketQuest()
     if q then
         local done,summary=replicatedObjectivesComplete(q)
-        if not done then questTracker.ticketStatus="Active "..q.Name..": "..summary;return end
+        if not done then
+            local generic,kind,objectiveIsland=genericCatchOrSkillObjective(q)
+            if generic then
+                local island=objectiveIsland or routeChoice(profile())
+                questTracker.ticketRoute=island
+                questTracker.ticketStatus="Active "..q.Name..": "..summary.." | farming "..island.." ("..kind..")"
+            else
+                questTracker.ticketRoute=nil
+                questTracker.ticketStatus="Active "..q.Name..": "..summary.." | specific objective not safely routable"
+            end
+            return
+        end
     end
+    questTracker.ticketRoute=nil
     local _,root=getChar()
     local _,active=minigame()
     if not root or active or isShopping() or buyerTripActive() then return end
@@ -2389,7 +2555,10 @@ end
 -- Zeng repeatable: both ChooseDialogueOption variants were verified against
 -- the public readable StarCrow source. Turn in ONLY if progress says complete.
 local function zengQuestTick()
-    if not (state.autoQuests and state.autoZengQuest) then return end
+    if not (state.autoQuests and state.autoZengQuest) then
+        questTracker.zengRoute=nil
+        return
+    end
     if questTracker.sageRoute then return end
     if os.clock()-questTracker.lastZeng<27 then return end
     local npc,part=dialogueGiver("Zeng Tianguo")
@@ -2401,10 +2570,19 @@ local function zengQuestTick()
     if active then
         local done,summary=replicatedObjectivesComplete(active)
         if not done then
-            questTracker.zengStatus="Active: "..summary
+            local generic,kind,objectiveIsland=genericCatchOrSkillObjective(active)
+            if generic then
+                local island=objectiveIsland or routeChoice(profile())
+                questTracker.zengRoute=island
+                questTracker.zengStatus="Active: "..summary.." | farming "..island.." ("..kind..")"
+            else
+                questTracker.zengRoute=nil
+                questTracker.zengStatus="Active: "..summary.." | specific objective not safely routable"
+            end
             return
         end
     end
+    questTracker.zengRoute=nil
     local _,root=getChar()
     local _,fishing=minigame()
     if not root or fishing or isShopping() or buyerTripActive() then return end
@@ -2500,37 +2678,44 @@ local function questTick()
     if not state.autoQuests then
         questTracker.status="OFF"
         questTracker.sageRoute=nil
-        hub.questAutomationChanging=true
-        for flag in pairs(hub.questManagedFlags) do
-            if state[flag] then setState(flag,false) end
-            hub.questManagedFlags[flag]=nil
-        end
-        hub.questAutomationChanging=false
+        questTracker.ticketRoute=nil
+        questTracker.zengRoute=nil
+        hub.releaseManagedFishing("quest")
+        return
+    end
+    local selected = hub.questSelectedCount and hub.questSelectedCount() or 0
+    if selected <= 0 then
+        questTracker.status="No automated quest selected. Open SELECT QUESTS and use ADD on a supported quest."
+        questTracker.sageRoute=nil
+        questTracker.ticketRoute=nil
+        questTracker.zengRoute=nil
+        hub.releaseManagedFishing("quest")
         return
     end
     if state.autoDailyQuest then claimCompletedDailies() end
     sageQuestTick()
-    -- Independent Auto Quest mode can start fishing when Sage goals need catches.
-    if state.autoSageAfterAmber and questTracker.sageRoute=="Amber Isle" then
-        hub.questAutomationChanging=true
-        for _,flag in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam",
-                              "charge","rhythm","phase2"}) do
-            if not state[flag] then
-                hub.questManagedFlags[flag]=true
-                setState(flag,true)
-            end
-        end
-        hub.questAutomationChanging=false
+    if questTracker.sageRoute then
+        -- Sage owns the route while its NPC/weight objective is active.
+        -- Never let Ticket or Zeng teleport the character away mid-step.
+        questTracker.ticketRoute=nil
+        questTracker.zengRoute=nil
+    elseif state.autoTicketQuests then
+        ticketQuestTick()
+        questTracker.zengRoute=nil
+    elseif state.autoZengQuest then
+        zengQuestTick()
+        questTracker.ticketRoute=nil
     else
-        hub.questAutomationChanging=true
-        for flag in pairs(hub.questManagedFlags) do
-            if state[flag] then setState(flag,false) end
-            hub.questManagedFlags[flag]=nil
-        end
-        hub.questAutomationChanging=false
+        questTracker.ticketRoute=nil
+        questTracker.zengRoute=nil
     end
-    ticketQuestTick()
-    zengQuestTick()
+    local needsQuestFishing = (state.autoSageAfterAmber and questTracker.sageRoute=="Amber Isle")
+        or questTracker.ticketRoute ~= nil or questTracker.zengRoute ~= nil
+    if needsQuestFishing then
+        hub.enableManagedFishing("quest")
+    else
+        hub.releaseManagedFishing("quest")
+    end
     questTracker.side=sideQuestStatus()
 end
 local function activeFarmOverride()
@@ -2538,20 +2723,26 @@ local function activeFarmOverride()
     if state.autoFarmMaterials and craftTracker.route then
         return craftTracker.route,"craft"
     end
-    if state.autoQuests and state.autoSageAfterAmber and questTracker.sageRoute then
+    if state.autoQuests and state.autoSageAfterAmber and questTracker.sageRoute=="Amber Isle" then
         return questTracker.sageRoute,"sage"
+    end
+    if state.autoQuests and state.autoTicketQuests and questTracker.ticketRoute then
+        return questTracker.ticketRoute,"ticket"
+    end
+    if state.autoQuests and state.autoZengQuest and questTracker.zengRoute then
+        return questTracker.zengRoute,"zeng"
     end
     return nil
 end
 local function auxiliaryFarmTick()
-    if state.autoLevel or not state.autoRoute then return end
+    if state.autoLevel then return end
     local island=activeFarmOverride()
     if not island or (os.clock()<(hub.manualTravelUntil or 0)) then return end
     local now=os.clock()
     if isShopping() or buyerTripActive() or sellTracker.pending then return end
-    -- Use the same verified dock/sea-facing gate as Auto Level so quest and
-    -- material farming cannot cast immediately after an unverified teleport.
-    hub.routeTravelTick(now,island)
+    -- Quest/craft routes are independent of the ordinary Auto Route toggle.
+    -- They still require a verified dock landing before the first cast.
+    hub.routeTravelTick(now,island,true)
 end
 local function scanMerchants()
     local folders={}
@@ -2631,8 +2822,8 @@ function hub.routeReadyForCast(island)
         hub.routeGate.status="Manual travel / NPC interaction active"
         return false
     end
-    if not state.autoRoute then return true end
     local override=ext.activeFarmOverride()
+    if not state.autoRoute and not override then return true end
     if not state.autoLevel and not override then return true end
     if not hub.routeGate.ready or hub.routeGate.island~=island then return false end
     local _,root,hum=getChar()
@@ -2646,8 +2837,8 @@ function hub.routeReadyForCast(island)
     end
     return true
 end
-function hub.routeTravelTick(now,island)
-    if not state.autoRoute then
+function hub.routeTravelTick(now,island,force)
+    if not state.autoRoute and not force then
         hub.routeGate.ready=true
         hub.routeGate.status="Auto route disabled"
         return
@@ -3367,7 +3558,7 @@ action(levelPage,"SCAN ALL LIVE RODS / CRAFT RECIPES",function()
 end)
 
 -- Quest selection board: a searchable multi-select modal, separate from Auto Level.
--- Only catalog entries with a verified handler can be enabled; all others remain INFO.
+-- Only catalog entries with a verified handler can run; all others are TRACK-only.
 local function buildQuestUI()
     section(questPage, "Quest automation")
     hub.questHUD = make("TextLabel", questPage, {
@@ -3385,11 +3576,24 @@ local function buildQuestUI()
     round(hub.questHUD, 9)
     edge(hub.questHUD, colors.outline, 0.72)
     toggle(questPage, "Auto quest engine", "autoQuests", function(v)
-        notify(v and "Quest engine ON. Only selected supported handlers will run." or "Quest engine OFF")
+        if v then
+            local count = hub.questSelectedCount and hub.questSelectedCount() or 0
+            if count == 0 then
+                notify("No automation selected. Open SELECT QUESTS → Automatable → ADD a quest first. TRACK entries do not run.")
+            else
+                notify("Quest engine ON for "..count.." selected automation(s).")
+            end
+        else
+            ext.questTracker.sageRoute=nil
+            ext.questTracker.ticketRoute=nil
+            ext.questTracker.zengRoute=nil
+            hub.releaseManagedFishing("quest")
+            notify("Quest engine OFF. Quest-owned casting/reeling/skills stopped; your manual settings are preserved.")
+        end
     end)
 
-    local QUEST_FILTERS = {"All rewards", "Rods", "Skills", "Orbs", "Tickets", "Daily", "Seasonal", "Other"}
-    local questFilter = "All rewards"
+    local QUEST_FILTERS = {"Automatable", "Track only", "All rewards", "Rods", "Skills", "Orbs", "Tickets", "Daily", "Seasonal", "Other"}
+    local questFilter = "Automatable"
     local questSearchText = ""
     local liveQuestEntries = {}
 
@@ -3397,6 +3601,13 @@ local function buildQuestUI()
         local count = 0
         for _, entry in ipairs(ext.QUESTRUN_CATALOG) do
             if entry.autoKey and state[entry.autoKey] then count = count + 1 end
+        end
+        return count
+    end
+    hub.questTrackedCount = function()
+        local count = 0
+        for _, selected in pairs(hub.trackedQuestIds) do
+            if selected then count = count + 1 end
         end
         return count
     end
@@ -3487,7 +3698,7 @@ local function buildQuestUI()
     })
     make("TextLabel", modalHeader, {
         BackgroundTransparency = 1,
-        Text = "Select supported quests. INFO entries are reference-only.",
+        Text = "ADD runs a verified handler. TRACK is a watchlist only. Active quest priority: Sage, then Ticket, then Zeng.",
         TextColor3 = colors.muted,
         Font = Enum.Font.Gotham,
         TextSize = 11,
@@ -3617,6 +3828,8 @@ local function buildQuestUI()
     track(doneButton.MouseButton1Click:Connect(closeQuestPicker))
 
     local function questFilterMatches(entry)
+        if questFilter == "Automatable" then return entry.autoKey ~= nil end
+        if questFilter == "Track only" then return entry.autoKey == nil end
         if questFilter == "All rewards" then return true end
         local kind = tostring(entry.rewardType or "Unknown")
         if questFilter == "Rods" then return kind == "Rod" or kind == "Rod Skin" end
@@ -3639,7 +3852,8 @@ local function buildQuestUI()
     end
     local function updateQuestSummary()
         local count = hub.questSelectedCount()
-        selectedSummary.Text = tostring(count) .. " supported handler(s) selected"
+        local tracked = hub.questTrackedCount()
+        selectedSummary.Text = tostring(count) .. " automation(s) selected  /  " .. tostring(tracked) .. " tracked only"
         pickerButton.Text = compact and "SELECT" or "SELECT QUESTS"
     end
     local function makeQuestEntryRow(entry)
@@ -3688,10 +3902,13 @@ local function buildQuestUI()
         })
         local supported = entry.autoKey ~= nil
         local selected = supported and state[entry.autoKey] == true
+        local tracked = not supported and hub.trackedQuestIds[entry.id] == true
         local status = make("TextButton", row, {
-            BackgroundColor3 = supported and (selected and colors.accent or colors.panel) or colors.panel,
-            TextColor3 = supported and (selected and colors.bg or colors.white) or colors.gold,
-            Text = supported and (selected and "SELECTED" or "ADD") or "INFO",
+            BackgroundColor3 = supported and (selected and colors.accent or colors.panel)
+                or (tracked and colors.accentSoft or colors.panel),
+            TextColor3 = supported and (selected and colors.bg or colors.white)
+                or (tracked and colors.accent or colors.gold),
+            Text = supported and (selected and "SELECTED" or "ADD") or (tracked and "TRACKED" or "TRACK"),
             Font = Enum.Font.GothamBold,
             TextSize = 12,
             BorderSizePixel = 0,
@@ -3703,16 +3920,22 @@ local function buildQuestUI()
         round(status, 8)
         track(status.MouseButton1Click:Connect(function()
             if not supported then
-                print("[KITKIT QUEST INFO] " .. tostring(entry.npc)
-                    .. " | Reward: " .. tostring(entry.reward)
-                    .. " | Objective: " .. tostring(entry.objective)
-                    .. " | " .. tostring(entry.automation))
-                notify(tostring(entry.reward or entry.npc) .. " is reference-only; no verified auto handler yet.")
+                hub.trackedQuestIds[entry.id] = not hub.trackedQuestIds[entry.id]
+                updateQuestSummary()
+                if hub.refreshQuestPicker then hub.refreshQuestPicker() end
+                notify(hub.trackedQuestIds[entry.id]
+                    and (tostring(entry.reward or entry.npc) .. " added to TRACK list only; no automation handler is verified.")
+                    or (tostring(entry.reward or entry.npc) .. " removed from TRACK list."))
                 return
             end
             setState(entry.autoKey, not state[entry.autoKey])
             updateQuestSummary()
             if hub.refreshQuestPicker then hub.refreshQuestPicker() end
+            if state[entry.autoKey] then
+                notify(tostring(entry.reward or entry.npc) .. " selected. Turn ON Auto Quest Engine to run it.")
+            else
+                notify(tostring(entry.reward or entry.npc) .. " removed from automation.")
+            end
         end))
     end
 
@@ -3732,6 +3955,12 @@ local function buildQuestUI()
             end
         end
         table.sort(entries, function(a, b)
+            local as = a.autoKey ~= nil and 0 or 1
+            local bs = b.autoKey ~= nil and 0 or 1
+            if as ~= bs then return as < bs end
+            local aSelected = a.autoKey and state[a.autoKey] and 0 or 1
+            local bSelected = b.autoKey and state[b.autoKey] and 0 or 1
+            if aSelected ~= bSelected then return aSelected < bSelected end
             local at = tostring(a.rewardType or "Unknown") .. tostring(a.npc or "")
             local bt = tostring(b.rewardType or "Unknown") .. tostring(b.npc or "")
             return at < bt
@@ -3765,7 +3994,10 @@ local function buildQuestUI()
             Font = Enum.Font.GothamMedium,
             TextSize = 12,
             BorderSizePixel = 0,
-            Size = UDim2.fromOffset(filterName == "All rewards" and 94 or 76, 30),
+            Size = UDim2.fromOffset(
+                filterName == "Automatable" and 104 or
+                filterName == "Track only" and 88 or
+                filterName == "All rewards" and 94 or 76, 30),
             ZIndex = 83,
             AutoButtonColor = false,
         })
@@ -3783,9 +4015,10 @@ local function buildQuestUI()
         for _, entry in ipairs(ext.QUESTRUN_CATALOG) do
             if entry.autoKey then setState(entry.autoKey, false) end
         end
+        hub.trackedQuestIds = {}
         updateQuestSummary()
         rebuildQuestPicker()
-        notify("Supported quest selections cleared. Master switch remains unchanged.")
+        notify("Quest automation selections and TRACK watchlist cleared. Master switch remains unchanged.")
     end))
     track(pickerButton.MouseButton1Click:Connect(function()
         rebuildQuestPicker()
@@ -3928,7 +4161,7 @@ local function buildQuestUI()
         notify("Quest catalog printed to executor console")
     end)
     make("TextLabel", questPage, {
-        Text = "Supported entries can be selected for automation. INFO entries show known rewards/objectives but remain reference-only until their live dialogue and completion handlers are verified.",
+        Text = "ADD = runs a verified quest handler. TRACK = watchlist only; it does not teleport, accept or complete the quest. Ticket/Zeng handlers accept and turn in; generic catch/skill objectives can farm, specific fish chains still need verified routes.",
         TextWrapped = true,
         TextYAlignment = Enum.TextYAlignment.Top,
         TextXAlignment = Enum.TextXAlignment.Left,
@@ -3966,18 +4199,44 @@ toggle(craftPage,"AUTO FARM MATERIAL FISH","autoFarmMaterials",function(v)
         setState("autoFarmMaterials",false)
         notify("Turn on Protect Craft Materials before gathering.")
     elseif v then
-        for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2"}) do
-            setState(k,true)
-        end
+        hub.enableManagedFishing("craft")
         setState("autoEnzo",false);setState("autoLong",false)
-        notify("Ingredient farming ON with fishing engine; wait for matching weather.")
+        ext.craftTracker.route=nil
+        ext.craftTracker.status="Scanning recipe, inventory and current weather before choosing a fish route"
+        notify("Material farming ON. It will wait for a verified weather/fish route before casting.")
+    else
+        if state.autoCraftRod then
+            setState("autoCraftRod",false)
+            hub.autoCraftOwnsMaterialFarm=false
+        end
+        ext.craftTracker.route=nil
+        hub.releaseManagedFishing("craft")
+        notify("Material farming OFF. Craft-owned casting/reeling/skills stopped; manual settings are preserved.")
     end
 end)
 toggle(craftPage,"AUTO CRAFT ROD (spends Gems!)","autoCraftRod",function(v)
     if v and not state.protectMaterials then
         setState("autoCraftRod",false)
         notify("Turn on ingredient protection before auto-crafting.")
-    elseif v then notify("Auto Craft ON: one attempt at a time; after an unconfirmed result, manually unlock the next attempt.") end
+    elseif v then
+        hub.autoCraftOwnsMaterialFarm = not state.autoFarmMaterials
+        if not state.autoFarmMaterials then setState("autoFarmMaterials",true) end
+        hub.enableManagedFishing("craft")
+        setState("autoEnzo",false);setState("autoLong",false)
+        ext.craftTracker.route=nil
+        ext.craftTracker.status="Auto Craft ON: material farming enabled; waiting for verified weather/fish route"
+        notify("Auto Craft ON. Auto Farm Materials is also ON; it will travel only when a recipe fish is available.")
+    else
+        if hub.autoCraftOwnsMaterialFarm then
+            setState("autoFarmMaterials",false)
+            hub.autoCraftOwnsMaterialFarm=false
+        end
+        if not state.autoFarmMaterials then
+            ext.craftTracker.route=nil
+            hub.releaseManagedFishing("craft")
+        end
+        notify("Auto Craft OFF. Any separately enabled material farming remains active.")
+    end
 end)
 toggle(craftPage,"Auto craft special bait if recipe known","autoCraftBait")
 toggle(craftPage,"Protect all known craft ingredients from Auto Sell","protectMaterials",function(v)
@@ -3985,6 +4244,9 @@ toggle(craftPage,"Protect all known craft ingredients from Auto Sell","protectMa
         setState("autoFarmMaterials",false)
         setState("autoCraftRod",false)
         setState("autoCraftBait",false)
+        hub.autoCraftOwnsMaterialFarm=false
+        ext.craftTracker.route=nil
+        hub.releaseManagedFishing("craft")
         notify("Material farming and auto-crafting stopped: ingredient protection must remain ON.")
     end
 end)
@@ -4311,14 +4573,23 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.8.1 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.8.3 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
         "FishingGUI="..tostring(select(2,minigame())),
         reelDiagnostics(),
         "Known code attempts="..tostring((function() local n=0 for _ in pairs(codesAttempted) do n=n+1 end return n end)()),
-        "Mode="..tostring(state.autoLevel).." State="..progressionStatus,
+        "Modes AutoLevel="..tostring(state.autoLevel).." AutoCast="..tostring(state.autoCast)
+            .." AutoQuests="..tostring(state.autoQuests).." AutoFarmMaterials="..tostring(state.autoFarmMaterials)
+            .." AutoCraftRod="..tostring(state.autoCraftRod).." AutoRoute="..tostring(state.autoRoute)
+            .." AutoSell="..tostring(state.autoSell).." State="..progressionStatus,
+        "FarmOverride="..tostring(select(1,ext.activeFarmOverride()))
+            .." CraftRoute="..tostring(ext.craftTracker.route)
+            .." CraftFish="..tostring(ext.craftTracker.fish)
+            .." Weather="..currentWeather()
+            .." SelectedQuests="..tostring(hub.questSelectedCount and hub.questSelectedCount() or 0)
+            .." TrackedQuests="..tostring(hub.questTrackedCount and hub.questTrackedCount() or 0),
         "RouteGate="..hub.routeGate.status.." Island="..tostring(hub.routeGate.island)
             .." Ready="..tostring(hub.routeGate.ready).." TPAttempts="..hub.routeGate.attempts
             .." ReadyChecks="..hub.routeGate.confirms.." BlockedCasts="..hub.routeGate.blockedCasts,
@@ -4340,6 +4611,33 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
             " Samba="..tostring(ext.merchantTracker.Samba~=nil),
         "AutoBuy="..tostring(state.autoBuyRod).." SeaFacing="..tostring(state.autoSeaFacing),
         "Data child keys="..table.concat(dataNames,", "),
+        "Level folder children="..(function()
+            local folder=p.levelFolder
+            local names={}
+            if folder then for _,child in ipairs(folder:GetChildren()) do
+                local value=child:IsA("ValueBase") and tostring(child.Value) or child.ClassName
+                table.insert(names,child.Name..":"..child.ClassName.."="..value)
+            end end
+            return table.concat(names,", ")
+        end)(),
+        "Active main quests="..(function()
+            local questFolder=d and d:FindFirstChild("Quest")
+            local main=questFolder and questFolder:FindFirstChild("Main")
+            local names={}
+            if main then for _,child in ipairs(main:GetChildren()) do table.insert(names,child.Name) end end
+            table.sort(names)
+            return table.concat(names,", ")
+        end)(),
+        "Live MainQuest modules="..(function()
+            local info=ReplicatedStorage:FindFirstChild("Info")
+            local folder=info and info:FindFirstChild("MainQuest")
+            local names={}
+            if folder then for _,child in ipairs(folder:GetChildren()) do
+                if child:IsA("ModuleScript") then table.insert(names,child.Name) end
+            end end
+            table.sort(names)
+            return table.concat(names,", ")
+        end)(),
         "Event names="..table.concat(names,", "),
         "No username, user ID, passwords, executor keys, webhooks or URLs exported.",
     }
@@ -4612,6 +4910,13 @@ local function progressionTick()
     if now-lastAutoLevelTick<3 then return end
     lastAutoLevelTick=now
     local p=profile()
+    if state.autoQuests and state.autoSageAfterAmber and questTracker.sageRoute=="Battlefield Isle" then
+        progressionStatus="Sage NPC interaction at Battlefield; Auto Level route paused"
+        hub.routeGate.ready=false
+        hub.routeGate.island=nil
+        hub.routeGate.status="Quest NPC interaction (not a fishing dock)"
+        return
+    end
     local unknownRod=unverifiedUpdateRod(p.rod)
     if unknownRod then
         progressionStatus="Paused: live Power for "..unknownRod.." is not exposed; scan live rod data"
@@ -4647,6 +4952,10 @@ local function progressionTick()
         progressionStatus="Sage Diamond quest: "..ext.questTracker.sage
     elseif overrideReason=="craft" then
         progressionStatus="Gathering "..tostring(ext.craftTracker.fish).." in "..desired
+    elseif overrideReason=="ticket" then
+        progressionStatus="Ticket quest farming: "..ext.questTracker.ticketStatus
+    elseif overrideReason=="zeng" then
+        progressionStatus="Zeng quest farming: "..ext.questTracker.zengStatus
     elseif not power then
         progressionStatus="Rod Power unknown: staying on Beginning Isle"
     else
@@ -4658,7 +4967,7 @@ local function progressionTick()
             progressionStatus="Farming "..desired.." (Power "..power..")"
         end
     end
-    hub.routeTravelTick(now,desired)
+    hub.routeTravelTick(now,desired,override~=nil)
     -- If we've made no XP and caught nothing on a higher island, back off one
     -- island temporarily. This avoids repeatedly failing catches on over-tier rods.
     if not override and index>1 and now-lastCatchAt>155 then
@@ -4725,10 +5034,31 @@ track(RunService.Heartbeat:Connect(function()
         and now - lastFishingEnd > math.max(0.4, state.castDelay) then
         local p=profile()
         local unknownRod=unverifiedUpdateRod(p.rod)
-        local island=ext.activeFarmOverride() or routeChoice(p)
+        local farmOverride=ext.activeFarmOverride()
+        local questRouteWaiting = state.autoQuests and (
+            (state.autoSageAfterAmber and not ext.diamondOwned() and ext.questTracker.sageRoute==nil)
+            or (state.autoTicketQuests and ext.questTracker.ticketRoute==nil)
+            or (state.autoZengQuest and ext.questTracker.zengRoute==nil))
+        local managedRouteWaiting = ((state.autoFarmMaterials or state.autoCraftRod) and not farmOverride)
+            or questRouteWaiting
+        local island=farmOverride or routeChoice(p)
         local root=char:FindFirstChild("HumanoidRootPart")
         local shopPause,shopReason=hub.shopNeedsPause(p)
         if not root then
+            lastCast=now
+        elseif managedRouteWaiting then
+            hub.routeGate.ready=false
+            if state.autoFarmMaterials or state.autoCraftRod then
+                hub.routeGate.status=ext.craftTracker.status or "Waiting for a matching material fish"
+            elseif state.autoSageAfterAmber and not ext.diamondOwned() then
+                hub.routeGate.status=ext.questTracker.sage or "Waiting for Sage route"
+            elseif state.autoTicketQuests then
+                hub.routeGate.status=ext.questTracker.ticketStatus or "Waiting for ticket quest route"
+            elseif state.autoZengQuest then
+                hub.routeGate.status=ext.questTracker.zengStatus or "Waiting for Zeng quest route"
+            else
+                hub.routeGate.status="Waiting for selected quest route"
+            end
             lastCast=now
         elseif state.autoLevel and state.autoRoute and unknownRod then
             progressionStatus="Casting paused: unknown live Power for "..unknownRod
@@ -4919,7 +5249,7 @@ task.spawn(function()
             hub.ui.headerSubtitle.Text="FISHING  /  "..barGuard.status
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.gold
         else
-            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.8.1"
+            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.8.3"
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.muted
         end
         hub.ui.levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -4928,7 +5258,7 @@ task.spawn(function()
             .." | "..string.format("%.1f",gainRate).." Lv/h"
         local suggested=nextRodSuggestion(p)
         hub.questHUD.Text="Master "..(state.autoQuests and "ON" or "OFF")
-            .." | Selected: "..hub.questSelectedCount()
+            .." | ADD: "..hub.questSelectedCount().." | TRACK: "..hub.questTrackedCount()
             .."\nSage: "..ext.questTracker.sage
             .."\nTicket: "..ext.questTracker.ticketStatus
             .."\nZeng: "..ext.questTracker.zengStatus
@@ -4940,7 +5270,7 @@ task.spawn(function()
         end
         hub.ui.craftHUD.Text=state.craftTarget.." ["..gathered.."/"..needed.."] "
             ..(state.autoFarmMaterials and "FARM ON" or "FARM OFF")
-            .." | Weather "..weather.."\n"..ext.craftTracker.status
+            .." | Weather "..currentWeather().."\n"..ext.craftTracker.status
             .."\nNext fish: "..tostring(ext.craftTracker.fish or "--")
             .." | Craft attempts: "..ext.craftTracker.attempts
         local merchantActive=false
@@ -4959,7 +5289,7 @@ task.spawn(function()
     end
 end)
 
-report("KITKIT v2.8.1 ready. Click the small K icon or press K to open the menu.")
+report("KITKIT v2.8.3 ready. Quest/craft routes, mode shutdown and quest selection fixes loaded.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
