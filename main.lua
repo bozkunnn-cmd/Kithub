@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.8.3 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.9.0 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
@@ -11,6 +11,8 @@ Research references (mechanics / event names, not code copied):
   https://github.com/NoahTyrant/StarCrow/blob/main/Heavyweigh%20Fishing
   https://github.com/p54803322-coder/PPINGYYY-HUB-/blob/main/main.lua
 
+Skill acquisition and character unlock reference catalogs include user-provided Discord material dated 2026-10-30.
+Character sacrifice choices are manual per attempt; this build never invokes UpgradeCharacter or spends resources.
 UNTESTED IN LIVE ROBLOX. Game updates/executor permissions may break features.
 Using a third-party executor can violate Roblox/game rules and risk your account.
 Only use code you trust. This script does not request credentials.
@@ -46,7 +48,7 @@ if type(env.KITKIT_HeavyweightFishing) == "table" and type(env.KITKIT_Heavyweigh
     pcall(function() env.KITKIT_HeavyweightFishing:Unload() end)
 end
 
-local hub = { running = true, connections = {}, esp = {}, touched = {}, originals = {}, manualTravelUntil=0, questManagedFlags={}, craftManagedFlags={}, questAutomationChanging=false, craftAutomationChanging=false, managedFlagBaseline={}, trackedQuestIds={}, autoCraftOwnsMaterialFarm=false }
+local hub = { running = true, connections = {}, esp = {}, touched = {}, originals = {}, manualTravelUntil=0, questManagedFlags={}, craftManagedFlags={}, questAutomationChanging=false, craftAutomationChanging=false, managedFlagBaseline={}, trackedQuestIds={}, trackedSkillIds={}, autoCraftOwnsMaterialFarm=false, characterSacrificePair=nil }
 env.KITKIT_HeavyweightFishing = hub
 
 local state = {
@@ -1643,8 +1645,8 @@ local merchantTracker = {Maoshan=nil,Taoist=nil,Halloween=nil,Samba=nil, lastSee
 local QUESTRUN_CATALOG = {
     -- autoKey points only to handlers that already exist in this build.
     {id="SageDiamond",npc="Sage Yijiu",island="Battlefield Isle",reward="Diamond Rod",rewardType="Rod",type="Sage 1",objective="Catch 5 fish of at least 1,500,000 kg each",autoKey="autoSageAfterAmber",automation="Auto: accept / farm / turn-in attempt"},
-    {id="SagePhoenix",npc="Sage Yijiu",island="Battlefield Isle",reward="Phoenix Strive Art v2",rewardType="Skill",type="Sage 2",objective="Own Phoenix Strive Art v2; catch 250 fish; catch Scarlet Fish and Elder Scarlet Fish at 1.5M kg in Bamboo Thunderstorm",automation="Track only: later Sage stage not implemented"},
-    {id="SageFivefold",npc="Sage Yijiu",island="Battlefield Isle",reward="Fivefold Ascension",rewardType="Skill",type="Sage 3",objective="Catch a 2M kg Draconic Koi; own Sever The Gate v3; catch 10 fish of 1M kg",automation="Track only: later Sage stage not implemented"},
+    {id="SagePhoenix",npc="Sage Yijiu",island="Battlefield Isle",reward="Phoenix Annihilation Art",rewardType="Skill",type="Sage 2",objective="Own Phoenix Annihilation Art; catch 250 fish; catch Scarlet Fish and Elder Scarlet Fish at 1.5M kg in Bamboo Thunderstorm",automation="Track only: later Sage stage not implemented"},
+    {id="SageFivefold",npc="Sage Yijiu",island="Battlefield Isle",reward="Fivefold Seal Ascension",rewardType="Skill",type="Sage 3",objective="Catch a 2M kg Draconic Koi; own Sever The Gate v3; catch 10 fish of 1M kg",automation="Track only: later Sage stage not implemented"},
     {id="SageTenfold",npc="Sage Yijiu",island="Battlefield Isle",reward="Tenfold Convergence",rewardType="Skill",type="Sage 4",objective="Catch a 6M kg Rainbow Dragon Fish; use Fivefold Ascension 50 times",automation="Track only: later Sage stage not implemented"},
     {id="SageOneHook",npc="Sage Yijiu",island="Battlefield Isle",reward="One Hook Dominance",rewardType="Skill",type="Sage 5",objective="Catch a 5M kg Frost Kingfish and 6.5M kg Frost Queen Fish; use Tenfold Convergence 100 times",automation="Track only: later Sage stage not implemented"},
     {id="CryoGravity",npc="Biao Di",island="Frost Isle",reward="Cryo Gravity Rod",rewardType="Rod",type="Rod quest",objective="100 Frost catches; two 1M+ kg Primordial Kunfish Overlords; four Primordial Kunfish",automation="Track only: seller quest dialogue not verified"},
@@ -1691,6 +1693,246 @@ local CRAFT_PLAN = {
 local function fold(s)
     return tostring(s or ""):lower():gsub("[^%w]", "")
 end
+local SKILL_SOURCE_CATALOG = {
+    {name="Skyfall Stomp", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Infinite Sky Ascension", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Unshaken Stance", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Swift Reel", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Demonfall Technique", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Reel Machine", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Reel Sprint", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Dragon Vitality", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Skybreaker Technique", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Aerial Rod Throw", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Thousand Enemy Sweep", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="One Strike Heaven Gate", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Rolling Chaos", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Rooster Strike", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Phoenix Strike Art", family="Cloud", source="Purchase from Sage Yijiu", island="Sage Yijiu", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Echohand Technique", family="Cloud", source="Listed as purchasable from Sage Yijiu, but unobtainable", island="Sage Yijiu", weather="Any", chance="Unobtainable", version="V1"},
+    {name="Dragon Strike", family="Cloud", source="Listed as purchasable from Sage Yijiu, but unobtainable", island="Sage Yijiu", weather="Any", chance="Unobtainable", version="V1"},
+    {name="Fivefold Seal Ascension", family="Cloud", source="Complete Sage Yijiu quest 3", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Beastbreaker Cleave", family="Cloud", source="Drop from Trueform Perch", island="Perch Isle", weather="Any", chance="5%", version="V1"},
+    {name="ISA V2", family="Cloud", source="Use Infinite Sky Ascension 100 times", island="Any", weather="Any", chance="Evolution", version="V2"},
+    {name="QSHG V2", family="Cloud", source="Use One Strike Heaven Gate 100 times", island="Any", weather="Any", chance="Evolution", version="V2"},
+    {name="Rolling Chaos V2", family="Cloud", source="Use Rolling Chaos 100 times", island="Any", weather="Any", chance="Evolution", version="V2"},
+    {name="Phoenix Strike Art V2", family="Cloud", source="Use Phoenix Strike Art 100 times", island="Any", weather="Any", chance="Evolution", version="V2"},
+    {name="Beastbreaker Cleave V2", family="Cloud", source="Complete Biao Di main quest", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V2"},
+    {name="ISA V3", family="Cloud", source="Use Infinite Sky Ascension V2 100 times", island="Any", weather="Any", chance="Evolution", version="V3"},
+    {name="QSHG V3", family="Cloud", source="Use One Strike Heaven Gate V2 100 times", island="Any", weather="Any", chance="Evolution", version="V3"},
+    {name="Rolling Chaos V3", family="Cloud", source="Use Rolling Chaos V2 100 times", island="Any", weather="Any", chance="Evolution", version="V3"},
+    {name="Phoenix Strike Art V3", family="Cloud", source="Use Phoenix Strike Art V2 100 times", island="Any", weather="Any", chance="Evolution", version="V3"},
+    {name="Leopard Lock", family="Normal", source="Taiji or Egoless banner roll", island="Banner", weather="Any", chance="Common", version="V1"},
+    {name="Iron Grip Art", family="Normal", source="Taiji or Egoless banner roll", island="Banner", weather="Any", chance="Common", version="V1"},
+    {name="Dual Sonic Kick", family="Normal", source="Taiji or Egoless banner roll", island="Banner", weather="Any", chance="Common", version="V1"},
+    {name="True Path Technique", family="Normal", source="Drop from Chromatic Koi", island="Amber Isle", weather="Any", chance="100%", version="V1"},
+    {name="Astral Backstep", family="Normal", source="Drop from Verdant Alligator Gar or Verdant Grouper secret boss", island="Fallout Isle", weather="Rainy", chance="25%", version="V1"},
+    {name="Upside Down Fishing", family="Normal", source="Drop from Tigerfang Whale secret boss", island="Coconut Isle", weather="Foggy", chance="100%", version="V1"},
+    {name="Whirlwind Fishing Art", family="Normal", source="Taiji or Egoless banner roll", island="Banner", weather="Any", chance="Legendary", version="V1"},
+    {name="Ruinous Sacrifice", family="Normal", source="Taiji banner roll", island="Banner", weather="Any", chance="Mythic", version="V1"},
+    {name="Bei Ming Technique", family="Bei Ming", source="Purchase from Bei Ming", island="Coconut Isle", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Head Smash", family="Bei Ming", source="Purchase from Bei Ming", island="Coconut Isle", weather="Any", chance="Shop purchase", version="V1"},
+    {name="Seven Wounds Fusion", family="Bei Ming", source="Complete Bei Ming main quest", island="Coconut Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Rod Whirl Technique", family="Pain", source="Drop from Toxic Chromatic Koi", island="Amber Isle", weather="Any", chance="10%", version="V1"},
+    {name="Phantom Afterimage Strike", family="Pain", source="Drop from Mutated Koi Whale", island="Coconut Isle", weather="Any", chance="10%", version="V1"},
+    {name="Cyclone Hook", family="Pain", source="Drop from Flying Fish Empress secret boss", island="Perch Isle", weather="Windy", chance="50%", version="V1"},
+    {name="Hellbreaking Hook", family="Pain", source="Drop from Flying Fish Emperor secret boss", island="Perch Isle", weather="Windy", chance="10%", version="V1"},
+    {name="Gate of Opening", family="Mountain", source="Drop from Serpent Fish", island="Amber Isle", weather="Any", chance="20%", version="V1"},
+    {name="Gate of Closure", family="Mountain", source="Drop from Dreadmare Eel", island="Amber Isle", weather="Any", chance="5%", version="V1"},
+    {name="Gate of Block", family="Mountain", source="Drop from Golden Guardian Fish", island="Battlefield Isle", weather="Any", chance="50%", version="V1"},
+    {name="Sever The Gate", family="Mountain", source="Drop from Overlord Primordial Kunfish", island="Frost Isle", weather="Any", chance="10%", version="V1"},
+    {name="Sever The Gate V2", family="Mountain", source="Use Sever The Gate 100 times", island="Any", weather="Any", chance="Evolution", version="V2"},
+    {name="Sever The Gate V3", family="Mountain", source="Complete Xia Diaodi quest", island="Frost Isle", weather="Any", chance="Quest reward", version="V3"},
+    {name="Rolling Twin Dragons", family="Sovereign Cloud", source="Egoless banner roll", island="Banner", weather="Any", chance="Mythic", version="V1"},
+    {name="Phoenix Annihilation Art", family="Sovereign Cloud", source="Complete Sage Yijiu quest 2", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Tenfold Convergence", family="Sovereign Cloud", source="Complete Sage Yijiu quest 4", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="One Hook Dominance", family="Sovereign Cloud", source="Complete Sage Yijiu quest 5 (final)", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Taijiquan Technique", family="Taiji", source="Drop from Trueform Jiaolong", island="Sovereign Isle", weather="Any", chance="50%", version="V1"},
+    {name="Taijiquan Technique V2", family="Taiji", source="Use Taijiquan Technique 100 times", island="Any", weather="Any", chance="Evolution", version="V2"},
+    {name="Taijiquan Technique V3", family="Taiji", source="Complete Old Jiang quest 2", island="Bamboo Isle", weather="Any", chance="Quest reward", version="V3"},
+    {name="Shadowless Taijiquan Technique", family="Taiji", source="Complete Old Jiang quest 3", island="Bamboo Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Ascended Taijiquan Technique", family="Taiji", source="Complete Old Jiang main quest", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Kin Slaying", family="Blood", source="Drop from Enzo boss", island="Fallout Isle", weather="Any", chance="Easy 5% / Hard 10% / Nightmare 20%", version="V1"},
+    {name="Master Slaying", family="Blood", source="Drop from Enzo boss", island="Fallout Isle", weather="Any", chance="Easy 5% / Hard 10% / Nightmare 20%", version="V1"},
+    {name="Lover Slaying", family="Blood", source="Drop from Enzo boss", island="Fallout Isle", weather="Any", chance="Easy 5% / Hard 10% / Nightmare 20%", version="V1"},
+    {name="Friend Slaying", family="Blood", source="Drop from Enzo boss", island="Fallout Isle", weather="Any", chance="Hard 5% / Nightmare 10%; no Easy drop", version="V1"},
+    {name="Egoless Technique", family="Blood", source="Egoless banner roll; listed as unobtainable", island="Banner", weather="Any", chance="Secret / Unobtainable", version="V1"},
+    {name="Tiger Hunt", family="Claw", source="Taiji or Egoless banner roll", island="Banner", weather="Any", chance="Legendary", version="V1"},
+    {name="Heaven Burden", family="Claw", source="Taiji or Egoless banner roll", island="Banner", weather="Any", chance="Legendary", version="V1"},
+    {name="Twelvefold Resonance", family="Claw", source="Drop from Sanguine Fish secret boss", island="Amber Isle", weather="Blazing Sun", chance="10%", version="V1"},
+    {name="Astral Grand Art", family="Claw", source="Drop from Crimson Bream Sovereign or Silver Bream Sovereign", island="Battlefield Isle", weather="Any", chance="5% / 10% respectively", version="V1"},
+    {name="Zenith Astral Grand Art", family="Claw", source="Complete Yu Jianchou main quest", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Apex Eagle Hunt", family="Pure Yang", source="Purchase from Taoist Merchant (Xiao Daoshi)", island="Roaming Taoist Merchant", weather="Any", chance="300M Cash", version="V1"},
+    {name="Pure Yang Wuji", family="Pure Yang", source="Complete Xiao Daoshi main quest", island="Taoist Merchant", weather="Any", chance="Quest reward", version="V1"},
+    {name="Mountain Flip", family="Maoshan", source="Drop from Mountain Fish", island="Mistpeak Isle", weather="Any", chance="5%", version="V1"},
+    {name="River Suppression", family="Maoshan", source="Purchase from Da Shixiong", island="Maoshan Merchant", weather="Any", chance="200M Cash", version="V1"},
+    {name="Nine Suns Ascension", family="Maoshan", source="Drop from Tiger Mirefish", island="Mistpeak Isle", weather="Any", chance="5%", version="V1"},
+    {name="Spirit Salvation", family="Maoshan", source="Complete Da Shixiong quest 1", island="Maoshan Merchant", weather="Any", chance="Quest reward", version="V1"},
+    {name="Demon Mountainbreaker", family="Maoshan", source="Egoless banner roll", island="Banner", weather="Any", chance="Mythic", version="V1"},
+    {name="Blazing Vajra", family="Buddha", source="Drop from Mirage Lanternfish secret boss", island="Mistpeak Isle", weather="Foggy", chance="5%", version="V1"},
+    {name="Vajra Godcast", family="Buddha", source="Taiji banner roll", island="Banner", weather="Any", chance="Mythic", version="V1"},
+    {name="Thousandfold Palm", family="Buddha", source="Drop from Octoparasitis Fish", island="Mistpeak Isle", weather="Any", chance="5%", version="V1"},
+    {name="Yuqing Flowing Cast", family="Sanqing", source="Forum PostSpirit (source wording unclear; verify in game)", island="Unknown", weather="Any", chance="Forum source", version="V1"},
+    {name="Shangqing Realm", family="Sanqing", source="Taiji banner roll", island="Banner", weather="Any", chance="Legendary", version="V1"},
+    {name="Taiqing Dao Realm", family="Sanqing", source="Drop from Nameless Octoparasite using Boss Bait", island="Boss Bait", weather="Any", chance="10%", version="V1"},
+    {name="Sanqing Reversion", family="Sanqing", source="Complete Da Shixiong quest 2", island="Maoshan Merchant", weather="Any", chance="Quest reward", version="V1"},
+    {name="Heavenbound Infinity", family="Divine Cloud", source="Drop from Verdant Bonefang or Crimson Bonefang secret boss", island="Fallout Isle", weather="Rainy", chance="5% / 10% respectively", version="V1"},
+    {name="Celestial Gate Breaker", family="Divine Cloud", source="Celestial banner roll; listed as unobtainable", island="Banner", weather="Any", chance="Secret / Unobtainable", version="V1"},
+    {name="Path of Heavenbreak", family="Ascension", source="Complete Duan Gan quest 1", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Heaven Earth Convergence", family="Ascension", source="Complete Duan Gan quest 2", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Beheading Cast", family="Ascension", source="Complete Duan Gan quest 3", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Pacifies the Clouds", family="Ascension", source="Drop from Mountain Dragonwhale secret boss", island="Battlefield Isle", weather="Windy", chance="5%", version="V1"},
+    {name="Six Vein Divine Hook", family="Normal", source="Give any boss fish to Dumb Guy; weight affects chance", island="Perch Isle", weather="Any", chance="2% at 5M kg cap; lower weight lowers chance", version="V1"},
+    {name="Dragon Subjugation", family="Buddha", source="Drop from Dark Kingfish", island="World Angler Isle", weather="Any", chance="5%", version="V1"},
+    {name="Vajra Fish Subjugation", family="Buddha", source="Heavenbreaker banner roll", island="Banner", weather="Any", chance="Legendary", version="V1"},
+    {name="Celestial Ape's Heavenbreaker", family="Divine Cloud", source="Heavenbreaker banner roll", island="Banner", weather="Any", chance="Secret", version="V1"},
+    {name="Beastbreaker Cleave V3", family="Cloud", source="Complete Biao Di quest on World Angler Isle", island="World Angler Isle", weather="Any", chance="Quest reward", version="V3"},
+    {name="Subdues the Dragon", family="Cloud", source="Xia Diaodi or Heavenbreaker banner roll", island="Banner", weather="Any", chance="Rare", version="V1"},
+    {name="Subdues the Eight Wastes", family="Cloud", source="Xia Diaodi banner roll", island="Banner", weather="Any", chance="Legendary", version="V1"},
+    {name="Vajra Angler Palm", family="Cloud", source="Xia Diaodi banner roll", island="Banner", weather="Any", chance="Legendary", version="V1"},
+    {name="Meat Grinder", family="Cloud", source="Xia Diaodi banner roll", island="Banner", weather="Any", chance="Mythical", version="V1"},
+    {name="Blade Machine", family="Cloud", source="Heavenbreaker banner roll", island="Banner", weather="Any", chance="Mythical", version="V1"},
+    {name="Taiji Qiankun Transmutation", family="Cloud", source="Drop from Darkness Shark", island="World Angler Isle", weather="Any", chance="5%", version="V1"},
+    {name="Lone Swan Treads Snow", family="Cloud", source="Drop from Crimson Bonefiend", island="World Angler Isle", weather="Any", chance="5%", version="V1"},
+    {name="Taishan Descent", family="Cloud", source="Drop from Flame Fish secret boss", island="Weather Isle", weather="Blazing Sun", chance="5%", version="V1"},
+    {name="Mountain Shatter", family="Cloud", source="Drop from Aquatic Fish secret boss", island="Weather Isle", weather="Rainy", chance="5%", version="V1"},
+    {name="Marseille Recovery", family="Cloud", source="Drop from Thunder Fish secret boss", island="Weather Isle", weather="Thunderstorm", chance="5%", version="V1"},
+    {name="Thunderbreak", family="Cloud", source="Drop from Wind Fish secret boss", island="Weather Isle", weather="Windy", chance="5%", version="V1"},
+    {name="Rhino Charger", family="Cloud", source="Drop from Killer Sawshark", island="Mystic Reef Isle", weather="Any", chance="5%", version="V1"},
+    {name="River Cyclone Slash", family="Cloud", source="Drop from Demon Bladefish", island="Mystic Reef Isle", weather="Any", chance="5%", version="V1"},
+    {name="Threefold Colossal Cauldron", family="Cloud", source="Drop from Thunder Bull Shark", island="Mystic Reef Isle", weather="Any", chance="10%", version="V1"},
+    {name="Time Severing Hook", family="Cloud", source="Drop from Colossal Bull Shark", island="Mystic Reef Isle", weather="Any", chance="5%", version="V1"},
+    {name="Piercing Heaven's Gate", family="Cloud", source="Complete Duan Gan quest 5: own Lone Swan Treads Snow, catch 7M kg Crimson Bonefiend, raise Duan Gan to level 5", island="Battlefield Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Twin Tiger Hooks", family="Cloud", source="Complete Biao Di quest 2: 5M kg Dragonfish Devourer, own Six Vein, catch any boss 100 times, raise Biao Di to level 5", island="World Angler Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Azure Dragon Talon", family="Cloud", source="Complete Biao Di quest 3: catch any boss 50 times and 4M kg Thunder Bull Shark", island="World Angler Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Celestial Plasma Blast", family="Cloud", source="Complete Chu Xin quest 1: win 25 PvP matches, own Omega Boat, raise Chu Xin to level 2", island="Weather Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Taiji Nine Palaces", family="Cloud", source="Complete Old Jiang quest: defeat Long Diaohai Nightmare and own Ascended Taiji Art plus Shadowless Taiji Strike", island="Weather Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Fishsea Heavenhook", family="Cloud", source="Complete Ba Chang quest 1: use Leopard Lock, Dual Sonic Kick, Iron Grip Art and Whirlwind Fishing Art 50 times each", island="Weather Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Upside Down Fishing V2", family="Cloud", source="Complete Ba Chang quest 2: use Fishsea Heavenhook 50 times, Upside Down Fishing 50 times, catch 2M kg Wind Fish", island="Weather Isle", weather="Any", chance="Quest reward", version="V2"},
+    {name="Sea Bullet Tornado", family="Cloud", source="Complete Ba Chang quest 3: raise Ba Chang to level 5 and catch 2M kg Flame Fish", island="Weather Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Immortal Slaying Hook", family="Cloud", source="Complete Ba Chang quest 4: catch 10 Trueform Jiaolong and 4M kg Thunder Bull Shark using Thunder Bait", island="Weather Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="One Hook River Dweller", family="Cloud", source="Complete Yaxuo quest 1: give 50M Cash", island="Mystic Reef Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Demon Wind Hook", family="Cloud", source="Complete Yaxuo quest 2: catch 2.5M kg Demon Bladefish and raise Yaxuo to level 3", island="Mystic Reef Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Threefold Demon Rampage", family="Cloud", source="Complete Yaxuo quest 3: catch 5M kg Colossal Bull Shark and give 500 Crystals", island="Mystic Reef Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Heaven's Restraint", family="Cloud", source="Complete Chu Wushuang quest: catch any boss 100 times", island="Mystic Reef Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Dragon Palace Stomp", family="Cloud", source="Complete Shi Xing Diao quest 1: raise Biao Di and Biao Ge to level 5", island="Mystic Reef Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Heaven Shatter", family="Cloud", source="Complete Shi Xing Diao quest 2: catch 50M kg Vermilion Birdblood", island="Mystic Reef Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Sea Pacifying Needle", family="Cloud", source="Complete Shi Xing Diao quest 3: raise Shi Xing Diao to level 5 and catch 75M kg Vermilion Birdblood", island="Mystic Reef Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Unity with Heaven", family="Cloud", source="Complete Chu Tianjiao quest: catch 75M kg Vermilion Birdblood and raise Chu Xin, Biao Di and Ba Chang to level 5", island="Mystic Reef Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Dragon Soars the Sky", family="Cloud", source="Drop from Long Diaohai", island="Long Diaohai boss", weather="Any", chance="Normal 5% / Hard 10% / Nightmare 20%", version="V1"},
+    {name="Dragon Warfield", family="Cloud", source="Drop from Long Diaohai", island="Long Diaohai boss", weather="Any", chance="Normal 5% / Hard 10% / Nightmare 20%", version="V1"},
+    {name="Dragon Tail Swipe", family="Cloud", source="Drop from Long Diaohai", island="Long Diaohai boss", weather="Any", chance="Normal 5% / Hard 10% / Nightmare 20%", version="V1"},
+    {name="Heavenborne War Dragon", family="Cloud", source="Drop from Long Diaohai", island="Long Diaohai boss", weather="Any", chance="Hard 5% / Nightmare 10%", version="V1"},
+    {name="Pierce Dragon Crossing", family="Cloud", source="Drop from Long Diaohai", island="Long Diaohai boss", weather="Any", chance="Hard 1% / Nightmare 5%", version="V1"},
+    {name="Pure Yang Cast", family="Pure Yang", source="Use Apex Eagle Hunt 100 times to evolve", island="Any", weather="Any", chance="Evolution", version="V1"},
+    {name="Demon Mountainbreaker V2", family="Maoshan", source="Complete Taoist quest: 1B Cash, own Demon Mountainbreaker, catch 14M kg Black Tortoise Bloodline", island="Taoist Merchant", weather="Any", chance="Quest reward", version="V2"},
+    {name="Soul Chain Assault", family="Pain", source="Drop from Dark LionFish", island="Mistpeak Isle", weather="Rainy", chance="Drop", version="V1"},
+    {name="Army Cleaving Sweep", family="Pain", source="Complete Louya Zhi Wang quest: own Soul Chain Assault and give 100M Cash", island="Louya Zhi Wang", weather="Any", chance="Quest reward", version="V1"},
+    {name="Tyrant's Leap", family="Pain", source="Complete Louya Zhi Wang quest: catch any boss 100 times and 2.5M kg Dark LionFish", island="Louya Zhi Wang", weather="Any", chance="Quest reward", version="V1"},
+    {name="Final Soul Reaping", family="Pain", source="Complete Louya Zhi Wang quest: catch 8M kg Black Tortoise Bloodline and raise Louya Zhi Wang to level 2", island="Louya Zhi Wang", weather="Any", chance="Quest reward", version="V1"},
+    {name="Serpentine Sword Intent", family="Taiji", source="Liu Ju He quest 1: own Time Severing Hook and give 100 Crystals", island="Weather Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Cloudflow Palm", family="Taiji", source="Liu Ju He quest 2: use Serpentine Sword Intent 50 times, catch 30M kg Thunder Bull Shark with Thunder Bait, defeat Long Diaohai Normal", island="Weather Isle", weather="Any", chance="Quest reward", version="V1"},
+    {name="Ocean Devourer", family="Taiji", source="Liu Ju He quest 3: defeat Long Diaohai Hard, catch any boss 100 times, raise Liu Ju He to level 3", island="Weather Isle", weather="Any", chance="Quest reward", version="V1"},
+}
+
+local CHARACTER_UNLOCKS = {
+    {name="Chu Xin", requirement="Free"},
+    {name="Biao Di", requirement="Free"},
+    {name="Ba Chang", requirement="Free"},
+    {name="Biao Ge", requirement="Free"},
+    {name="Enzo", requirement="Own Friend Slaying OR Egoless Technique"},
+    {name="Sage Yijiu", requirement="Own One Hook Dominance"},
+    {name="NanJiang", requirement="Own Hell Breaking Hook"},
+    {name="Yu Jianchou", requirement="Own Zenith Astral Grand Art"},
+    {name="Jiang Lao", requirement="Roll the Taiji Banner (Secret rarity)"},
+    {name="Da Shixiong", requirement="Own Yuqing Flowing Cast"},
+    {name="Xiao Daoshi", requirement="Own Apex Eagle Hunt"},
+    {name="Bei Ming", requirement="Own Seven Wounds Fusion"},
+    {name="Long Diaohai", requirement="Own Fierce Dragon Crossing"},
+    {name="Wuzhi Diaowang", requirement="Own Thunderbreak"},
+    {name="Zeng Tianguo", requirement="Own Taiji Qiankun Transmutation"},
+    {name="Diao Kewei", requirement="Own Blade Machine"},
+    {name="Xia Diaodi", requirement="Secret rarity roll from banner"},
+    {name="Chu Tianjiao", requirement="Own Unity with Heaven"},
+    {name="Yaxuo", requirement="Own One Hook River Dweller"},
+    {name="Shi Xing Diao", requirement="Own Heaven Shatter"},
+}
+
+local EXTRA_QUESTS = {
+    {id="HalloweenWraithOrca", npc="Riku", island="Beginning Isle", reward="Trait Reroll / Ticket / Cursed Lantern Rod Skin / possible no reward", rewardType="Seasonal", type="Halloween event", objective="During Foggy weather, catch a Wraith Orca on any island and give it to Riku on Beginning Isle; reward is random or may be nothing", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="AscendedPerchPureGolden", npc="Feng You Diao", island="Perch Isle", reward="Pure Golden Rod", rewardType="Rod", type="Quest objective from user Discord screenshot", objective="Catch one Ascended Perch weighing at least 990,000 kg", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="LiuJuHe1", npc="Liu Ju He", island="Weather Isle", reward="Serpentine Sword Intent", rewardType="Skill", type="Quest 1", objective="Own Time Severing Hook and give 100 Crystals", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="LiuJuHe2", npc="Liu Ju He", island="Weather Isle", reward="Cloudflow Palm", rewardType="Skill", type="Quest 2", objective="Use Serpentine Sword Intent 50 times; catch 30M kg Thunder Bull Shark with Thunder Bait; defeat Long Diaohai Normal", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="LiuJuHe3", npc="Liu Ju He", island="Weather Isle", reward="Ocean Devourer", rewardType="Skill", type="Quest 3", objective="Defeat Long Diaohai Hard; catch any boss 100 times; raise Liu Ju He to level 3", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="DuanGan1", npc="Duan Gan", island="Battlefield Isle", reward="Path of Heavenbreak", rewardType="Skill", type="Quest 1", objective="Duan Gan quest 1", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="DuanGan2", npc="Duan Gan", island="Battlefield Isle", reward="Heaven Earth Convergence", rewardType="Skill", type="Quest 2", objective="Duan Gan quest 2", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="DuanGan3", npc="Duan Gan", island="Battlefield Isle", reward="Beheading Cast", rewardType="Skill", type="Quest 3", objective="Duan Gan quest 3", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="DuanGan5", npc="Duan Gan", island="Battlefield Isle", reward="Piercing Heaven's Gate", rewardType="Skill", type="Quest 5", objective="Own Lone Swan Treads Snow; catch 7M kg Crimson Bonefiend; raise Duan Gan to level 5", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="OldJiangBamboo2", npc="Old Jiang", island="Bamboo Isle", reward="Taijiquan Technique V3", rewardType="Skill", type="Quest 2", objective="Old Jiang quest 2", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="OldJiangBamboo3", npc="Old Jiang", island="Bamboo Isle", reward="Shadowless Taijiquan Technique", rewardType="Skill", type="Quest 3", objective="Old Jiang quest 3", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="OldJiangBattlefield", npc="Old Jiang", island="Battlefield Isle", reward="Ascended Taijiquan Technique", rewardType="Skill", type="Main quest", objective="Old Jiang main quest", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="OldJiangWeather", npc="Old Jiang", island="Weather Isle", reward="Taiji Nine Palaces", rewardType="Skill", type="Quest", objective="Defeat Long Diaohai Nightmare; own Ascended Taiji Art and Shadowless Taiji Strike", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="BiaoDiBattlefield", npc="Biao Di", island="Battlefield Isle", reward="Beastbreaker Cleave V2", rewardType="Skill", type="Main quest", objective="Complete Biao Di main quest", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="BiaoDiWorld2", npc="Biao Di", island="World Angler Isle", reward="Twin Tiger Hooks", rewardType="Skill", type="Quest 2", objective="Catch 5M kg Dragonfish Devourer; own Six Vein; catch any boss 100 times; raise Biao Di to level 5", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="BiaoDiWorld3", npc="Biao Di", island="World Angler Isle", reward="Azure Dragon Talon", rewardType="Skill", type="Quest 3", objective="Catch any boss 50 times and 4M kg Thunder Bull Shark", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="BaChang1", npc="Ba Chang", island="Weather Isle", reward="Fishsea Heavenhook", rewardType="Skill", type="Quest 1", objective="Use Leopard Lock, Dual Sonic Kick, Iron Grip Art and Whirlwind Fishing Art 50 times each", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="BaChang2", npc="Ba Chang", island="Weather Isle", reward="Upside Down Fishing V2", rewardType="Skill", type="Quest 2", objective="Use Fishsea Heavenhook 50 times and Upside Down Fishing 50 times; catch 2M kg Wind Fish", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="BaChang3", npc="Ba Chang", island="Weather Isle", reward="Sea Bullet Tornado", rewardType="Skill", type="Quest 3", objective="Raise Ba Chang to level 5 and catch 2M kg Flame Fish", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="BaChang4", npc="Ba Chang", island="Weather Isle", reward="Immortal Slaying Hook", rewardType="Skill", type="Quest 4", objective="Catch 10 Trueform Jiaolong and 4M kg Thunder Bull Shark with Thunder Bait", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="Yaxuo1", npc="Yaxuo", island="Mystic Reef Isle", reward="One Hook River Dweller", rewardType="Skill", type="Quest 1", objective="Give 50M Cash", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="Yaxuo2", npc="Yaxuo", island="Mystic Reef Isle", reward="Demon Wind Hook", rewardType="Skill", type="Quest 2", objective="Catch 2.5M kg Demon Bladefish and raise Yaxuo to level 3", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="Yaxuo3", npc="Yaxuo", island="Mystic Reef Isle", reward="Threefold Demon Rampage", rewardType="Skill", type="Quest 3", objective="Catch 5M kg Colossal Bull Shark and give 500 Crystals", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="ChuWushuang", npc="Chu Wushuang", island="Mystic Reef Isle", reward="Heaven's Restraint", rewardType="Skill", type="Main quest", objective="Catch any boss 100 times", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="ShiXing1", npc="Shi Xing Diao", island="Mystic Reef Isle", reward="Dragon Palace Stomp", rewardType="Skill", type="Quest 1", objective="Raise Biao Di and Biao Ge to level 5", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="ShiXing2", npc="Shi Xing Diao", island="Mystic Reef Isle", reward="Heaven Shatter", rewardType="Skill", type="Quest 2", objective="Catch 50M kg Vermilion Birdblood", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="ShiXing3", npc="Shi Xing Diao", island="Mystic Reef Isle", reward="Sea Pacifying Needle", rewardType="Skill", type="Quest 3", objective="Raise Shi Xing Diao to level 5 and catch 75M kg Vermilion Birdblood", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="ChuTianjiao", npc="Chu Tianjiao", island="Mystic Reef Isle", reward="Unity with Heaven", rewardType="Skill", type="Main quest", objective="Catch 75M kg Vermilion Birdblood; raise Chu Xin, Biao Di and Ba Chang to level 5", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="LouyaArmy", npc="Louya Zhi Wang", island="Location not specified", reward="Army Cleaving Sweep", rewardType="Skill", type="Quest", objective="Own Soul Chain Assault and give 100M Cash", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="LouyaTyrant", npc="Louya Zhi Wang", island="Location not specified", reward="Tyrant's Leap", rewardType="Skill", type="Quest", objective="Catch any boss 100 times and 2.5M kg Dark LionFish", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="LouyaFinal", npc="Louya Zhi Wang", island="Location not specified", reward="Final Soul Reaping", rewardType="Skill", type="Quest", objective="Catch 8M kg Black Tortoise Bloodline and raise Louya Zhi Wang to level 2", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="TaoistDemonMountainV2", npc="Xiao Daoshi / Taoist", island="Taoist Merchant", reward="Demon Mountainbreaker V2", rewardType="Skill", type="Quest", objective="Give 1B Cash; own Demon Mountainbreaker; catch 14M kg Black Tortoise Bloodline", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="XiaDiaodiFrost", npc="Xia Diaodi", island="Frost Isle", reward="Sever The Gate V3", rewardType="Skill", type="Quest", objective="Complete Xia Diaodi quest", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="DaShixiong1", npc="Da Shixiong", island="Maoshan Merchant", reward="Spirit Salvation", rewardType="Skill", type="Quest 1", objective="Complete Da Shixiong quest 1", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="DaShixiong2", npc="Da Shixiong", island="Maoshan Merchant", reward="Sanqing Reversion", rewardType="Skill", type="Quest 2", objective="Complete Da Shixiong quest 2", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="BeiMingMain", npc="Bei Ming", island="Coconut Isle", reward="Seven Wounds Fusion", rewardType="Skill", type="Main quest", objective="Complete Bei Ming main quest", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+    {id="ChuXinWeather", npc="Chu Xin", island="Weather Isle", reward="Celestial Plasma Blast", rewardType="Skill", type="Quest 1", objective="Win 25 PvP matches; own Omega Boat; raise Chu Xin to level 2", automation="TRACK ONLY: Discord objective reference; NPC dialogue / completion handler not verified", source="User-provided Discord guide"},
+}
+
+-- Append source-backed reference entries without claiming they have automation.
+local function catalogFold(value)
+    return tostring(value or ""):lower():gsub("[^%w]", "")
+end
+for _, entry in ipairs(EXTRA_QUESTS) do
+    table.insert(QUESTRUN_CATALOG, entry)
+end
+local seenSkillRewards = {}
+for _, entry in ipairs(QUESTRUN_CATALOG) do
+    seenSkillRewards[catalogFold(entry.reward)] = true
+end
+for _, skill in ipairs(SKILL_SOURCE_CATALOG) do
+    if not seenSkillRewards[catalogFold(skill.name)] then
+        local slug = skill.name:gsub("[^%w]", "")
+        table.insert(QUESTRUN_CATALOG, {
+            id="SkillSource_"..slug, npc=skill.island == "Banner" and "Banner / Summon" or skill.island,
+            island=skill.island, reward=skill.name, rewardType="Skill",
+            type=skill.family.." / "..skill.version,
+            objective=skill.source.." | Weather: "..skill.weather.." | Rate / rarity: "..skill.chance,
+            automation="TRACK ONLY: acquisition reference; no verified automated handler",
+            source="User-provided Discord skill guide",
+        })
+        seenSkillRewards[catalogFold(skill.name)] = true
+    end
+end
+for _, character in ipairs(CHARACTER_UNLOCKS) do
+    table.insert(QUESTRUN_CATALOG, {
+        id="CharacterUnlock_"..character.name:gsub("[^%w]", ""),
+        npc="Character unlock", island="Character system", reward=character.name,
+        rewardType="Character", type="Unlock requirement", objective=character.requirement,
+        automation="TRACK ONLY: ownership / unlock handler not mapped",
+        source="User-provided Discord character guide",
+    })
+end
+
 local function readFishMetadata(item)
     if not item then return nil end
     local name=type(item)=="string" and item or item.Name
@@ -2799,7 +3041,7 @@ local function tpMerchant(kind)
     return teleportTo(part.CFrame*CFrame.new(0,0,-7),kind.." merchant")
 end
 
-return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, scanLiveRodData=scanLiveRodData, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, discoverLiveQuestModules=discoverLiveQuestModules, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
+return {questTracker=questTracker, craftTracker=craftTracker, merchantTracker=merchantTracker, QUESTRUN_CATALOG=QUESTRUN_CATALOG, SKILL_SOURCE_CATALOG=SKILL_SOURCE_CATALOG, CHARACTER_UNLOCKS=CHARACTER_UNLOCKS, CRAFT_PLAN=CRAFT_PLAN, ownedFishCount=ownedFishCount, recipeForTarget=recipeForTarget, liveCraftModule=liveCraftModule, scanLiveRodData=scanLiveRodData, beginCraftAttempt=beginCraftAttempt, craftTick=craftTick, questTick=questTick, findQuestNPC=findQuestNPC, sideQuestStatus=sideQuestStatus, discoverLiveQuestModules=discoverLiveQuestModules, scanMerchants=scanMerchants, tpMerchant=tpMerchant, diamondOwned=diamondOwned, activeFarmOverride=activeFarmOverride, auxiliaryFarmTick=auxiliaryFarmTick}
 end)()
 
 function hub.armAutoRoute()
@@ -3020,7 +3262,7 @@ local title = make("TextLabel", header, {
 })
 local headerSubtitle = make("TextLabel", header, {
     BackgroundTransparency = 1,
-    Text = "FISHING AUTOMATION  /  2.8",
+    Text = "FISHING AUTOMATION  /  2.9",
     TextXAlignment = Enum.TextXAlignment.Left,
     Font = Enum.Font.GothamMedium,
     TextSize = 11,
@@ -3173,7 +3415,7 @@ local pages = {}
 local tabs = {}
 local activeTab = "Level"
 local navGlyphs = {
-    Level = "LV", Fish = "FI", Quests = "QU", Craft = "CR",
+    Level = "LV", Fish = "FI", Quests = "QU", Skills = "SK", Characters = "CH", Craft = "CR",
     World = "WO", Boss = "BO", Other = "ST",
 }
 local function activate(name)
@@ -3268,6 +3510,8 @@ end
 local levelPage = createTab("Level")
 local fishPage = createTab("Fish")
 local questPage = createTab("Quests")
+local skillPage = createTab("Skills")
+local characterPage = createTab("Characters")
 local craftPage = createTab("Craft")
 local worldPage = createTab("World")
 local bossPage = createTab("Boss")
@@ -3592,7 +3836,7 @@ local function buildQuestUI()
         end
     end)
 
-    local QUEST_FILTERS = {"Automatable", "Track only", "All rewards", "Rods", "Skills", "Orbs", "Tickets", "Daily", "Seasonal", "Other"}
+    local QUEST_FILTERS = {"Automatable", "Track only", "All rewards", "Rods", "Skills", "Characters", "Orbs", "Tickets", "Daily", "Seasonal", "Other"}
     local questFilter = "Automatable"
     local questSearchText = ""
     local liveQuestEntries = {}
@@ -3698,7 +3942,7 @@ local function buildQuestUI()
     })
     make("TextLabel", modalHeader, {
         BackgroundTransparency = 1,
-        Text = "ADD runs a verified handler. TRACK is a watchlist only. Active quest priority: Sage, then Ticket, then Zeng.",
+        Text = "ADD runs a verified handler, or adds an unverified entry to your reference tracker. Only supported entries can automate. Priority: Sage, Ticket, Zeng.",
         TextColor3 = colors.muted,
         Font = Enum.Font.Gotham,
         TextSize = 11,
@@ -3834,6 +4078,7 @@ local function buildQuestUI()
         local kind = tostring(entry.rewardType or "Unknown")
         if questFilter == "Rods" then return kind == "Rod" or kind == "Rod Skin" end
         if questFilter == "Skills" then return kind == "Skill" end
+        if questFilter == "Characters" then return kind == "Character" end
         if questFilter == "Orbs" then return kind == "Orb" end
         if questFilter == "Tickets" then return kind == "Ticket" end
         if questFilter == "Daily" then return kind == "Daily" end
@@ -3846,7 +4091,7 @@ local function buildQuestUI()
         local haystack = table.concat({
             tostring(entry.npc or ""), tostring(entry.type or ""),
             tostring(entry.reward or ""), tostring(entry.rewardType or ""),
-            tostring(entry.island or ""), tostring(entry.objective or ""),
+            tostring(entry.island or ""), tostring(entry.objective or ""), tostring(entry.source or ""),
         }, " "):lower()
         return string.find(haystack, q, 1, true) ~= nil
     end
@@ -3908,7 +4153,7 @@ local function buildQuestUI()
                 or (tracked and colors.accentSoft or colors.panel),
             TextColor3 = supported and (selected and colors.bg or colors.white)
                 or (tracked and colors.accent or colors.gold),
-            Text = supported and (selected and "SELECTED" or "ADD") or (tracked and "TRACKED" or "TRACK"),
+            Text = supported and (selected and "SELECTED" or "ADD") or (tracked and "ADDED" or "ADD"),
             Font = Enum.Font.GothamBold,
             TextSize = 12,
             BorderSizePixel = 0,
@@ -3924,8 +4169,8 @@ local function buildQuestUI()
                 updateQuestSummary()
                 if hub.refreshQuestPicker then hub.refreshQuestPicker() end
                 notify(hub.trackedQuestIds[entry.id]
-                    and (tostring(entry.reward or entry.npc) .. " added to TRACK list only; no automation handler is verified.")
-                    or (tostring(entry.reward or entry.npc) .. " removed from TRACK list."))
+                    and (tostring(entry.reward or entry.npc) .. " added to the reference tracker only; no automation handler is verified.")
+                    or (tostring(entry.reward or entry.npc) .. " removed from the reference tracker."))
                 return
             end
             setState(entry.autoKey, not state[entry.autoKey])
@@ -3997,7 +4242,7 @@ local function buildQuestUI()
             Size = UDim2.fromOffset(
                 filterName == "Automatable" and 104 or
                 filterName == "Track only" and 88 or
-                filterName == "All rewards" and 94 or 76, 30),
+                filterName == "All rewards" and 94 or filterName == "Characters" and 88 or 76, 30),
             ZIndex = 83,
             AutoButtonColor = false,
         })
@@ -4018,7 +4263,7 @@ local function buildQuestUI()
         hub.trackedQuestIds = {}
         updateQuestSummary()
         rebuildQuestPicker()
-        notify("Quest automation selections and TRACK watchlist cleared. Master switch remains unchanged.")
+        notify("Quest automation selections and reference watchlist cleared. Master switch remains unchanged.")
     end))
     track(pickerButton.MouseButton1Click:Connect(function()
         rebuildQuestPicker()
@@ -4173,6 +4418,236 @@ local function buildQuestUI()
     })
 end
 buildQuestUI()
+
+-- Skills reference library: complete acquisition guide from the user's Discord source.
+-- All source rows are informational unless a separate verified handler exists.
+local function buildSkillsUI()
+    section(skillPage, "Skill acquisition library")
+    local intro = make("TextLabel", skillPage, {
+        BackgroundColor3=colors.panel, TextColor3=colors.muted,
+        Text="Search every known skill, evolution, banner roll, NPC purchase and boss drop. Source data is from the supplied Discord guide; rates are not live-verified.",
+        TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Center,
+        Font=Enum.Font.Gotham, TextSize=11, Size=UDim2.new(1,-4,0,58),
+    })
+    round(intro,9); edge(intro,colors.outline,0.72)
+    local search = make("TextBox", skillPage, {
+        BackgroundColor3=colors.panel, TextColor3=colors.white, PlaceholderColor3=colors.muted,
+        PlaceholderText="Search skill, NPC, island, weather or requirement...", Text="",
+        ClearTextOnFocus=false, Font=Enum.Font.Gotham, TextSize=12,
+        TextXAlignment=Enum.TextXAlignment.Left, BorderSizePixel=0,
+        Size=UDim2.new(1,-4,0,38),
+    })
+    round(search,8); edge(search,colors.outline,0.52)
+    make("UIPadding",search,{PaddingLeft=UDim.new(0,12),PaddingRight=UDim.new(0,10)})
+    local families={"All","Cloud","Normal","Bei Ming","Pain","Mountain","Sovereign Cloud","Taiji","Blood","Claw","Pure Yang","Maoshan","Buddha","Sanqing","Divine Cloud","Ascension"}
+    local activeFamily="All"
+    local filterStrip=make("ScrollingFrame",skillPage,{
+        BackgroundTransparency=1,BorderSizePixel=0,Size=UDim2.new(1,-4,0,34),
+        CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.X,
+        ScrollingDirection=Enum.ScrollingDirection.X,ScrollBarThickness=0,
+    })
+    local stripLayout=make("UIListLayout",filterStrip,{FillDirection=Enum.FillDirection.Horizontal,Padding=UDim.new(0,6),SortOrder=Enum.SortOrder.LayoutOrder})
+    local familyButtons={}
+    local rowsHost=make("Frame",skillPage,{BackgroundTransparency=1,Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y})
+    local rowsLayout=make("UIListLayout",rowsHost,{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder})
+    local function rebuild()
+        for _,child in ipairs(rowsHost:GetChildren()) do if child:IsA("Frame") then child:Destroy() end end
+        local query=search.Text:lower()
+        local shown=0
+        for _,entry in ipairs(ext.SKILL_SOURCE_CATALOG) do
+            local familyOK=activeFamily=="All" or entry.family==activeFamily
+            local hay=(entry.name.." "..entry.family.." "..entry.source.." "..entry.island.." "..entry.weather.." "..entry.chance):lower()
+            if familyOK and (query=="" or hay:find(query,1,true)) then
+                shown=shown+1
+                local row=make("Frame",rowsHost,{BackgroundColor3=colors.row,BorderSizePixel=0,Size=UDim2.new(1,-4,0,82)})
+                round(row,9)
+                make("TextLabel",row,{BackgroundTransparency=1,Text=entry.name.."  /  "..entry.family.." "..entry.version,
+                    TextColor3=colors.white,Font=Enum.Font.GothamSemibold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,
+                    TextTruncate=Enum.TextTruncate.AtEnd,Position=UDim2.fromOffset(12,7),Size=UDim2.new(1,-112,0,18)})
+                make("TextLabel",row,{BackgroundTransparency=1,Text=entry.source,
+                    TextColor3=colors.accent,Font=Enum.Font.GothamMedium,TextSize=11,TextXAlignment=Enum.TextXAlignment.Left,
+                    TextTruncate=Enum.TextTruncate.AtEnd,Position=UDim2.fromOffset(12,28),Size=UDim2.new(1,-112,0,18)})
+                make("TextLabel",row,{BackgroundTransparency=1,Text=entry.island.."  /  "..entry.weather.."  /  "..entry.chance,
+                    TextColor3=colors.muted,Font=Enum.Font.Gotham,TextSize=10,TextXAlignment=Enum.TextXAlignment.Left,
+                    TextTruncate=Enum.TextTruncate.AtEnd,Position=UDim2.fromOffset(12,51),Size=UDim2.new(1,-112,0,17)})
+                local added=hub.trackedSkillIds[entry.name]==true
+                local btn=make("TextButton",row,{BackgroundColor3=added and colors.accentSoft or colors.panel,
+                    TextColor3=added and colors.accent or colors.white,Text=added and "ADDED" or "ADD",
+                    Font=Enum.Font.GothamBold,TextSize=11,BorderSizePixel=0,Size=UDim2.fromOffset(78,28),
+                    Position=UDim2.new(1,-90,0.5,-14),AutoButtonColor=false})
+                round(btn,8)
+                track(btn.MouseButton1Click:Connect(function()
+                    hub.trackedSkillIds[entry.name]=not hub.trackedSkillIds[entry.name]
+                    rebuild()
+                    notify(entry.name..(hub.trackedSkillIds[entry.name] and " added to skill tracker." or " removed from skill tracker."))
+                end))
+            end
+        end
+        intro.Text=""..shown.." matching skills. Search by name, NPC, island, weather, drop chance or requirement. Discord reference data; not every source has an automation handler."
+        task.defer(function() rowsHost.Size=UDim2.new(1,-4,0,rowsLayout.AbsoluteContentSize.Y) end)
+    end
+    for _,family in ipairs(families) do
+        local chip=make("TextButton",filterStrip,{BackgroundColor3=family==activeFamily and colors.accentSoft or colors.panel,
+            TextColor3=family==activeFamily and colors.accent or colors.muted,Text=family,
+            Font=Enum.Font.GothamMedium,TextSize=11,BorderSizePixel=0,Size=UDim2.fromOffset(math.max(58,#family*7+22),30),AutoButtonColor=false})
+        round(chip,8); familyButtons[family]=chip
+        track(chip.MouseButton1Click:Connect(function()
+            activeFamily=family
+            for n,b in pairs(familyButtons) do
+                local selected=n==activeFamily
+                b.BackgroundColor3=selected and colors.accentSoft or colors.panel
+                b.TextColor3=selected and colors.accent or colors.muted
+            end
+            rebuild()
+        end))
+    end
+    track(search:GetPropertyChangedSignal("Text"):Connect(rebuild))
+    hub.refreshSkillIndex=rebuild
+    action(skillPage,"PRINT FILTERED SKILL SOURCES",function()
+        local q=search.Text:lower(); local n=0
+        for _,entry in ipairs(ext.SKILL_SOURCE_CATALOG) do
+            local hay=(entry.name.." "..entry.family.." "..entry.source.." "..entry.island.." "..entry.weather.." "..entry.chance):lower()
+            if (activeFamily=="All" or entry.family==activeFamily) and (q=="" or hay:find(q,1,true)) then
+                n=n+1
+                print(('[KITKIT SKILL %03d] %s | %s | %s | %s | %s | %s'):format(n,entry.name,entry.family,entry.source,entry.island,entry.weather,entry.chance))
+            end
+        end
+        notify("Printed "..n.." matching skill source entries to console.")
+    end)
+    rebuild()
+end
+
+-- Character collection and manual Shadow sacrifice helper.
+-- No automatic UpgradeCharacter invocation: each attempt requires fresh manual choices.
+local function buildCharacterUI()
+    section(characterPage,"Character progression")
+    local intro=make("TextLabel",characterPage,{BackgroundColor3=colors.panel,TextColor3=colors.muted,
+        Text="Character unlock requirements and Shadow leveling reference. Video cost reference: 500 Levels / 5B Cash / 1K Crystals / 200 Tickets. Verify the live Shadow menu; every attempt requires fresh manual choices.",
+        TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,
+        Font=Enum.Font.Gotham,TextSize=11,Size=UDim2.new(1,-4,0,58)})
+    round(intro,9);edge(intro,colors.outline,0.72)
+    section(characterPage,"Shadow: manual level-up offers")
+    local offerA,offerB=nil,nil
+    local selectingOffer=nil
+    local offerOptions={
+        {name="Player Levels",display="Player Levels (500 reference)"},
+        {name="Cash",display="Cash (5B reference)"},
+        {name="Crystals",display="Crystals (1K reference)"},
+        {name="Tickets",display="Tickets (200 reference)"},
+    }
+    local offerNames={"Player Levels","Cash","Crystals","Tickets"}
+    local function offerLabel(value) return value or "Choose manually" end
+    local offerCard=make("Frame",characterPage,{BackgroundColor3=colors.row,BorderSizePixel=0,Size=UDim2.new(1,-4,0,104)})
+    round(offerCard,10)
+    make("TextLabel",offerCard,{BackgroundTransparency=1,Text="OFFER A",TextColor3=colors.muted,Font=Enum.Font.GothamBold,TextSize=10,
+        TextXAlignment=Enum.TextXAlignment.Left,Position=UDim2.fromOffset(13,10),Size=UDim2.fromOffset(100,18)})
+    local offerAButton=make("TextButton",offerCard,{BackgroundColor3=colors.panel,TextColor3=colors.white,Text=offerLabel(offerA),
+        Font=Enum.Font.GothamMedium,TextSize=12,BorderSizePixel=0,Size=UDim2.fromOffset(170,30),Position=UDim2.new(1,-184,0,6),AutoButtonColor=false})
+    round(offerAButton,8)
+    make("TextLabel",offerCard,{BackgroundTransparency=1,Text="OFFER B",TextColor3=colors.muted,Font=Enum.Font.GothamBold,TextSize=10,
+        TextXAlignment=Enum.TextXAlignment.Left,Position=UDim2.fromOffset(13,58),Size=UDim2.fromOffset(100,18)})
+    local offerBButton=make("TextButton",offerCard,{BackgroundColor3=colors.panel,TextColor3=colors.white,Text=offerLabel(offerB),
+        Font=Enum.Font.GothamMedium,TextSize=12,BorderSizePixel=0,Size=UDim2.fromOffset(170,30),Position=UDim2.new(1,-184,0,53),AutoButtonColor=false})
+    round(offerBButton,8)
+    local offerOverlay=make("Frame",GUI,{Name="CharacterOfferPicker",BackgroundTransparency=1,Size=UDim2.fromScale(1,1),Visible=false,ZIndex=90})
+    local offerBackdrop=make("TextButton",offerOverlay,{Text="",BackgroundColor3=Color3.fromRGB(3,9,16),BackgroundTransparency=0.3,
+        BorderSizePixel=0,Size=UDim2.fromScale(1,1),ZIndex=90,AutoButtonColor=false})
+    local offerModal=make("Frame",offerOverlay,{BackgroundColor3=colors.bg,BorderSizePixel=0,Size=UDim2.fromOffset(300,270),
+        AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.fromScale(0.5,0.5),ZIndex=91})
+    round(offerModal,12);edge(offerModal,colors.outline,0.2)
+    make("TextLabel",offerModal,{BackgroundTransparency=1,Text="Choose one sacrifice",TextColor3=colors.white,
+        Font=Enum.Font.GothamBold,TextSize=16,Position=UDim2.fromOffset(16,12),Size=UDim2.new(1,-32,0,26),ZIndex=92})
+    make("TextLabel",offerModal,{BackgroundTransparency=1,Text="Choose a different resource for each offer.",TextColor3=colors.muted,
+        Font=Enum.Font.Gotham,TextSize=11,Position=UDim2.fromOffset(16,39),Size=UDim2.new(1,-32,0,18),ZIndex=92})
+    local offerChoiceButtons={}
+    for i,option in ipairs(offerOptions) do
+        local name=option.name
+        local btn=make("TextButton",offerModal,{BackgroundColor3=colors.row,TextColor3=colors.white,Text=option.display,
+            Font=Enum.Font.GothamMedium,TextSize=13,BorderSizePixel=0,Size=UDim2.new(1,-28,0,36),
+            Position=UDim2.fromOffset(14,66+(i-1)*43),ZIndex=92,AutoButtonColor=false})
+        round(btn,8);offerChoiceButtons[i]=btn
+        track(btn.MouseButton1Click:Connect(function()
+            if selectingOffer=="A" then offerA=name else offerB=name end
+            offerAButton.Text=offerLabel(offerA);offerBButton.Text=offerLabel(offerB)
+            offerOverlay.Visible=false
+        end))
+    end
+    track(offerBackdrop.MouseButton1Click:Connect(function() offerOverlay.Visible=false end))
+    track(offerAButton.MouseButton1Click:Connect(function() selectingOffer="A";offerOverlay.Visible=true end))
+    track(offerBButton.MouseButton1Click:Connect(function() selectingOffer="B";offerOverlay.Visible=true end))
+    local choiceStatus=make("TextLabel",characterPage,{BackgroundTransparency=1,TextColor3=colors.muted,
+        Text="No sacrifice pair selected. Costs shown by The Shadow in-game are authoritative.",TextWrapped=true,
+        TextXAlignment=Enum.TextXAlignment.Left,Font=Enum.Font.Gotham,TextSize=11,Size=UDim2.new(1,-4,0,38)})
+    action(characterPage,"CONFIRM PAIR FOR THIS LEVEL-UP",function()
+        if not offerA or not offerB then notify("Choose both sacrifice offers first.");return end
+        if offerA==offerB then notify("Choose two different sacrifice types.");return end
+        hub.characterSacrificePair={first=offerA,second=offerB,confirmedAt=os.clock(),used=false}
+        choiceStatus.Text="Confirmed for ONE attempt: "..offerA.." + "..offerB..". Select these manually in The Shadow menu. KITKIT will not spend resources."
+        notify("Manual pair confirmed: "..offerA.." + "..offerB..". No resources spent.")
+    end)
+    action(characterPage,"RESET CHOICES FOR NEXT ATTEMPT",function()
+        offerA=nil;offerB=nil;hub.characterSacrificePair=nil
+        offerAButton.Text=offerLabel(offerA);offerBButton.Text=offerLabel(offerB)
+        choiceStatus.Text="Choices cleared. Select two offers again for the next attempt."
+        notify("Character sacrifice choices reset.")
+    end)
+    action(characterPage,"FIND / TELEPORT TO THE SHADOW",function()
+        local npc=ext.findQuestNPC("shadow")
+        if npc then
+            hub.manualTravelUntil=os.clock()+35
+            teleportTo(npc.CFrame*CFrame.new(0,0,-6),"The Shadow")
+            notify("Teleported near The Shadow. Open Deal manually.")
+        else
+            notify("The Shadow NPC is not loaded in workspace.NPC / NPCs. Find him manually, then retry.")
+        end
+    end)
+    action(characterPage,"SCAN CHARACTER DATA (READ ONLY)",function()
+        local pd=playerData()
+        local folder=pd and (pd:FindFirstChild("PlayerCharacter") or pd:FindFirstChild("CharacterInventory"))
+        if not folder then notify("PlayerCharacter folder not replicated; no ownership assumptions made.");return end
+        print("[KITKIT CHARACTER] Folder="..folder:GetFullName())
+        for _,obj in ipairs(folder:GetChildren()) do
+            local value=obj:IsA("ValueBase") and tostring(obj.Value) or ""
+            print("[KITKIT CHARACTER] "..obj.Name.." | "..obj.ClassName.." | "..value)
+        end
+        notify("Character data printed read-only to console.")
+    end)
+    section(characterPage,"Character unlock requirements")
+    local characterSearch=make("TextBox",characterPage,{BackgroundColor3=colors.panel,TextColor3=colors.white,
+        PlaceholderColor3=colors.muted,PlaceholderText="Search character or required skill...",Text="",ClearTextOnFocus=false,
+        Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,BorderSizePixel=0,Size=UDim2.new(1,-4,0,38)})
+    round(characterSearch,8);edge(characterSearch,colors.outline,0.52)
+    make("UIPadding",characterSearch,{PaddingLeft=UDim.new(0,12),PaddingRight=UDim.new(0,10)})
+    local characterRows=make("Frame",characterPage,{BackgroundTransparency=1,Size=UDim2.new(1,-4,0,0),AutomaticSize=Enum.AutomaticSize.Y})
+    local characterRowsLayout=make("UIListLayout",characterRows,{Padding=UDim.new(0,7),SortOrder=Enum.SortOrder.LayoutOrder})
+    local function rebuildCharacters()
+        for _,child in ipairs(characterRows:GetChildren()) do if child:IsA("Frame") then child:Destroy() end end
+        local q=characterSearch.Text:lower()
+        for _,entry in ipairs(ext.CHARACTER_UNLOCKS) do
+            if q=="" or (entry.name.." "..entry.requirement):lower():find(q,1,true) then
+                local row=make("Frame",characterRows,{BackgroundColor3=colors.row,BorderSizePixel=0,Size=UDim2.new(1,-4,0,62)})
+                round(row,9)
+                make("TextLabel",row,{BackgroundTransparency=1,Text=entry.name,TextColor3=colors.white,
+                    Font=Enum.Font.GothamSemibold,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left,
+                    Position=UDim2.fromOffset(12,7),Size=UDim2.new(1,-120,0,18),TextTruncate=Enum.TextTruncate.AtEnd})
+                make("TextLabel",row,{BackgroundTransparency=1,Text=entry.requirement,TextColor3=colors.accent,
+                    Font=Enum.Font.Gotham,TextSize=10,TextXAlignment=Enum.TextXAlignment.Left,
+                    Position=UDim2.fromOffset(12,30),Size=UDim2.new(1,-120,0,22),TextTruncate=Enum.TextTruncate.AtEnd})
+                local badge=make("TextLabel",row,{BackgroundColor3=colors.panel,TextColor3=colors.gold,Text="CHECK IN GAME",
+                    Font=Enum.Font.GothamBold,TextSize=9,BorderSizePixel=0,Size=UDim2.fromOffset(96,25),
+                    Position=UDim2.new(1,-108,0.5,-12)})
+                round(badge,7)
+            end
+        end
+        task.defer(function() characterRows.Size=UDim2.new(1,-4,0,characterRowsLayout.AbsoluteContentSize.Y) end)
+    end
+    track(characterSearch:GetPropertyChangedSignal("Text"):Connect(rebuildCharacters))
+    hub.refreshCharacters=rebuildCharacters
+    rebuildCharacters()
+end
+
+buildSkillsUI()
+buildCharacterUI()
 
 section(craftPage,"Auto gather + craft (separate)")
 local craftHUD=make("TextLabel",craftPage,{
@@ -4573,7 +5048,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.8.3 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.9.0 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
@@ -5249,7 +5724,7 @@ task.spawn(function()
             hub.ui.headerSubtitle.Text="FISHING  /  "..barGuard.status
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.gold
         else
-            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.8.3"
+            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.0"
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.muted
         end
         hub.ui.levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -5289,7 +5764,7 @@ task.spawn(function()
     end
 end)
 
-report("KITKIT v2.8.3 ready. Quest/craft routes, mode shutdown and quest selection fixes loaded.")
+report("KITKIT v2.9.0 ready. Skill library, character unlocks and manual Shadow offers loaded.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
