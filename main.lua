@@ -1,5 +1,5 @@
 --[[
-KITKIT HUB v2.9.1 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.9.2 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
 remote loader, speculative purchase remotes, paid summons or auto-rolls.
 AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
@@ -1643,7 +1643,8 @@ local craftTracker = {status="Idle", route=nil, fish=nil, lastAt=-math.huge,
     attempts=0, lastBefore=nil, pendingAt=0, manualReview=false, lastBaitAt=-math.huge,
     baitPending=nil, baitManualReview={}, lastEquipBaitAt=-math.huge, lastSuccessful=nil, fishCount=0}
 local merchantTracker = {Maoshan=nil,Taoist=nil,Halloween=nil,Samba=nil, lastSeen={}, lastScan=-math.huge,
-    alerts=0, seenThisSession={}}
+    alerts=0, seenThisSession={}, spawnAt=nil, expiresAt=nil, nextSpawnAt=nil, announcedKind=nil,
+    island=nil, announcement="No roaming merchant announcement yet", lastAnnouncement=""}
 local QUESTRUN_CATALOG = {
     -- autoKey points only to handlers that already exist in this build.
     {id="SageDiamond",npc="Sage Yijiu",island="Battlefield Isle",reward="Diamond Rod",rewardType="Rod",type="Sage 1",objective="Catch 5 fish of at least 1,500,000 kg each",autoKey="autoSageAfterAmber",automation="Auto: accept / farm / turn-in attempt"},
@@ -2988,9 +2989,61 @@ local function auxiliaryFarmTick()
     -- They still require a verified dock landing before the first cast.
     hub.routeTravelTick(now,island,true)
 end
+local MERCHANT_ALIASES={
+    Maoshan={"maoshan","maosan","dashixiong","maoshanmerchant","merchantmaoshan"},
+    Taoist={"taoist","taosi","xiaodaoshi","taoistmerchant","merchanttaoist"},
+    Halloween={"halloween","riku","halloweennpc"},
+    Samba={"samba"},
+}
+local function merchantKindFromText(raw)
+    local name=fold(raw)
+    for kind,aliases in pairs(MERCHANT_ALIASES) do
+        for _,alias in ipairs(aliases) do
+            if name:find(alias,1,true) then return kind end
+        end
+    end
+    return nil
+end
+local function nearestIslandName(position)
+    local best,bestDistance=nil,math.huge
+    for _,entry in ipairs(ISLANDS) do
+        local d=(position-Vector3.new(entry[2],entry[3],entry[4])).Magnitude
+        if d<bestDistance then best,bestDistance=entry[1],d end
+    end
+    return best,bestDistance
+end
+local function recordMerchantAnnouncement(message)
+    local text=tostring(message or "")
+    local lower=text:lower()
+    if not (lower:find("merchant",1,true) or lower:find("merchant has appeared",1,true)
+        or lower:find("merchant spawned",1,true)) then return false end
+    local kind=merchantKindFromText(text)
+    if not kind then
+        -- Changelog says the roaming merchant is a 50/50 Taoist or Maoshan.
+        if lower:find("roaming",1,true) or lower:find("appeared",1,true) or lower:find("spawned",1,true) then
+            merchantTracker.announcedKind="Unknown (Taoist / Maoshan)"
+        else return false end
+    else
+        merchantTracker.announcedKind=kind
+    end
+    local now=os.clock()
+    merchantTracker.spawnAt=now
+    merchantTracker.expiresAt=now+600 -- User-provided guide: 10-minute appearance window.
+    merchantTracker.nextSpawnAt=now+1800 -- User-provided guide: 30-minute spawn cycle.
+    merchantTracker.announcement=text:sub(1,180)
+    merchantTracker.lastAnnouncement=text
+    local normalized=fold(text)
+    for _,entry in ipairs(ISLANDS) do
+        local islandKey=fold(entry[1]):gsub("isle$","")
+        if normalized:find(islandKey,1,true) then merchantTracker.island=entry[1];break end
+    end
+    merchantTracker.alerts=merchantTracker.alerts+1
+    notify("ROAMING MERCHANT: "..merchantTracker.announcedKind.." reported. Find/scan the spawned NPC; window ~10 minutes.")
+    return true
+end
 local function scanMerchants()
     local folders={}
-    for _,folderName in ipairs({"NPC","NPCs","Merchant","NPCDialogue"}) do
+    for _,folderName in ipairs({"NPC","NPCs","Merchant","NPCDialogue","Function"}) do
         local folder=workspace:FindFirstChild(folderName)
         if folder then table.insert(folders,folder) end
     end
@@ -2998,19 +3051,11 @@ local function scanMerchants()
     merchantTracker.Taoist=nil
     merchantTracker.Halloween=nil
     merchantTracker.Samba=nil
-    if #folders==0 then
-        for _,kind in ipairs({"Maoshan","Taoist","Halloween","Samba"}) do merchantTracker.lastSeen[kind]=false end
-        return
-    end
     for _,npc in ipairs(folders) do
         for _,obj in ipairs(npc:GetDescendants()) do
             if obj:IsA("Model") or obj:IsA("BasePart") then
-                local name=fold(obj.Name)..fold(obj:GetAttribute("Name") or "")
-                local kind=nil
-                if name:find("maoshan",1,true) or name:find("maosan",1,true) then kind="Maoshan"
-                elseif name:find("taoist",1,true) or name:find("taosi",1,true) then kind="Taoist"
-                elseif name:find("halloween",1,true) then kind="Halloween"
-                elseif name:find("samba",1,true) then kind="Samba" end
+                local raw=tostring(obj.Name).." "..tostring(obj:GetAttribute("Name") or "")
+                local kind=merchantKindFromText(raw)
                 if kind then
                     local part=getPart(obj)
                     if part and part:IsDescendantOf(workspace) then
@@ -3022,13 +3067,41 @@ local function scanMerchants()
     end
     for _,kind in ipairs({"Maoshan","Taoist","Halloween","Samba"}) do
         local part=merchantTracker[kind]
-        if state.merchantAlerts and part and not merchantTracker.lastSeen[kind] then
-            merchantTracker.alerts=merchantTracker.alerts+1
-            notify(kind.." NPC detected! TAP the popup to teleport; loaded server NPC only.")
+        if part then
+            local island=nearestIslandName(part.Position)
+            merchantTracker.island=island
+            if state.merchantAlerts and not merchantTracker.lastSeen[kind] then
+                merchantTracker.alerts=merchantTracker.alerts+1
+                merchantTracker.announcement=kind.." merchant/NPC loaded at "..tostring(island)
+                notify(kind.." merchant detected at "..tostring(island).."! Tap the popup to teleport.")
+            end
         end
         merchantTracker.lastSeen[kind]=part~=nil
     end
+    if merchantTracker.expiresAt and os.clock()>merchantTracker.expiresAt then
+        merchantTracker.spawnAt=nil
+        merchantTracker.expiresAt=nil
+        merchantTracker.announcedKind=nil
+    end
 end
+-- Chat announcement detection covers the 30-minute / 10-minute roaming event
+-- even when the NPC model has not streamed to this client yet.
+pcall(function()
+    local chat=game:GetService("TextChatService")
+    local channels=chat:FindFirstChild("TextChannels")
+    local general=channels and (channels:FindFirstChild("RBXGeneral") or channels:FindFirstChildWhichIsA("TextChannel"))
+    if general and general.MessageReceived then
+        track(general.MessageReceived:Connect(function(message)
+            local source=message and message.TextSource
+            if not source or source.UserId==0 then
+                recordMerchantAnnouncement(message and message.Text or "")
+            end
+        end))
+    end
+end)
+track(LocalPlayer.Chatted:Connect(function(message)
+    recordMerchantAnnouncement(message)
+end))
 local function tpMerchant(kind)
     local part=merchantTracker[kind]
     if not part or not part.Parent or not part:IsDescendantOf(workspace) then
@@ -3514,6 +3587,7 @@ local function createTab(name)
     return scroll
 end
 local levelPage = createTab("Level")
+local progressionPage = createTab("Progression")
 local fishPage = createTab("Fish")
 local questPage = createTab("Quests")
 local skillPage = createTab("Skills")
@@ -3522,6 +3596,7 @@ local craftPage = createTab("Craft")
 local worldPage = createTab("World")
 local bossPage = createTab("Boss")
 local extraPage = createTab("Other")
+
 
 local function section(parent, name)
     local holder = make("Frame", parent, {
@@ -3622,6 +3697,39 @@ local function toggle(parent, label, key, onChange)
         if onChange then onChange(state[key]) end
     end))
 end
+-- Progression roadmap from the supplied Discord guide. This is an advisor:
+-- it never purchases skills/rods/orbs or performs character rebirth automatically.
+section(progressionPage,"Fresh-account roadmap")
+local roadmapIntro=make("TextLabel",progressionPage,{BackgroundColor3=colors.panel,TextColor3=colors.white,
+    Font=Enum.Font.Gotham,TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+    Size=UDim2.new(1,-4,0,58),Text="Priority planner based on your Discord progression guide. Live inventory and quest data take priority; uncertain prices stay estimates."})
+round(roadmapIntro,8);edge(roadmapIntro,colors.outline,0.7)
+local roadmapStatus=make("TextLabel",progressionPage,{BackgroundColor3=colors.row,TextColor3=colors.accent,
+    Font=Enum.Font.GothamMedium,TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+    Size=UDim2.new(1,-4,0,105),Text="Scanning profile..."})
+round(roadmapStatus,8)
+section(progressionPage,"Merchant preparation")
+local merchantGuide=make("TextLabel",progressionPage,{BackgroundColor3=colors.panel,TextColor3=colors.white,
+    Font=Enum.Font.Gotham,TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+    Size=UDim2.new(1,-4,0,118),Text="Roaming merchant: 50/50 Taoist or Maoshan. Reported cycle: every 30 min, visible for 10 min. Waiting for chat announcement or NPC scan."})
+round(merchantGuide,8)
+action(progressionPage,"SCAN MERCHANTS NOW",function()
+    ext.scanMerchants()
+    notify("Taoist="..(ext.merchantTracker.Taoist and "FOUND" or "not loaded").." | Maoshan="..(ext.merchantTracker.Maoshan and "FOUND" or "not loaded"))
+end)
+action(progressionPage,"TP TO DETECTED TAOIST",function() ext.tpMerchant("Taoist") end)
+action(progressionPage,"TP TO DETECTED MAOSHAN",function() ext.tpMerchant("Maoshan") end)
+section(progressionPage,"Resource goals / do not auto-spend")
+local resourceGuide=make("TextLabel",progressionPage,{BackgroundColor3=colors.row,TextColor3=colors.white,
+    Font=Enum.Font.Gotham,TextSize=12,TextWrapped=true,TextXAlignment=Enum.TextXAlignment.Left,
+    Size=UDim2.new(1,-4,0,150),Text=[[Early: Easy Ticket quest -> Sky Infinity Ascension.
+Mid: collect Sage / Duan Gan prerequisite skills.
+Merchant goal (guide estimate): Taoist Rod 100M + Apex Eagle Hunt 300M + Taoist Orb 100M = 500M.
+Late: required characters: Ba Chang, Biao Di, Biao Ge, Chu Xin, Duan Gan, Xiao Daoshi, Da Shixiong, Yaxuo, Shi Xing Diao, Louya Zhi Wang.
+Rebirth suggestion: 5B Cash; Level + Cash only. Preserve Crystals / Tickets unless you choose otherwise.]]})
+round(resourceGuide,8)
+
+
 local function stepper(parent, label, key, minVal, maxVal, jump, suffix)
     local row = rowBase(parent, 46)
     make("TextLabel", row, {
@@ -4915,6 +5023,8 @@ action(worldPage,"REFRESH NPC / EVENT SCAN",function()
     for _,name in ipairs({"Maoshan","Taoist","Halloween","Samba"}) do
         parts[#parts+1]=name.."="..(ext.merchantTracker[name] and "HERE" or "not loaded")
     end
+    parts[#parts+1]="Announcement="..tostring(ext.merchantTracker.announcedKind or "none")
+    parts[#parts+1]="Island="..tostring(ext.merchantTracker.island or "unknown")
     notify(table.concat(parts," | "))
 end)
 action(worldPage,"TP TO MAOSHAN (if spawned)",function() ext.tpMerchant("Maoshan") end)
@@ -5066,7 +5176,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.9.1 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.9.2 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "RouteDecision="..tostring(select(1,routeChoice(p)))
@@ -5732,6 +5842,42 @@ task.spawn(function()
         hub.ui.statusTop.Text="Lv "..tostring(p.level or "?").."  /  Bag "..tostring(count or "?").."/"..tostring(cap or "?")
             .."  /  "..weather
         hub.ui.weatherLabel.Text="Current weather: "..weather
+        if roadmapStatus and roadmapStatus.Parent then
+            local target=nextRodSuggestion(p)
+            local _,nextIsland,required=hub.nextIslandGoal(p)
+            local skillFolder=p.data and p.data:FindFirstChild("Skill")
+            local hasSkyInfinity=false
+            if skillFolder then
+                for _,item in ipairs(skillFolder:GetDescendants()) do
+                    local n=fold(item.Name)
+                    if n=="infiniteskyascension" or n=="skyinfinityascension" then hasSkyInfinity=true;break end
+                end
+            end
+            local cashNow=tonumber(p.cash) or 0
+            local phase="EARLY: Complete Easy Ticket and acquire Sky Infinity Ascension."
+            if not hasSkyInfinity then
+                phase="EARLY PRIORITY: Sky Infinity Ascension from Sage Yijiu (manual shop purchase; verify ownership)."
+            elseif cashNow<500000000 then
+                phase="RESOURCE PHASE: save toward the guide's 500M Taoist package; do not spend Crystals/Tickets on rebirth."
+            elseif not (ext.merchantTracker.Taoist or ext.merchantTracker.Maoshan) then
+                phase="MERCHANT PHASE: 500M goal reached; wait for Taoist/Maoshan spawn and inspect live shop prices."
+            else
+                phase="MERCHANT PHASE: merchant detected; review Taoist/Maoshan purchases manually before spending."
+            end
+            if cashNow>=5000000000 then phase="REBIRTH READY (guide): 5B Cash. Select Level + Cash only; confirm manually." end
+            local lines={"PROFILE: Lv "..tostring(p.level or "?").." | "..tostring(cashNow).." Cash | "..tostring(p.rod or "No rod"),
+                "ROD ROUTE: "..tostring(route)..(nextIsland and (" -> "..nextIsland.." ("..tostring(required).." Power)") or " | final listed island"),
+                "NEXT CASH ROD: "..(target and (target.name.." / "..tostring(target.cost).." Cash / "..target.island) or "No higher cash target identified"),
+                phase,
+                "AFTER MERCHANT: evolve Apex Eagle Hunt to Pure Yang Cast; collect Sage / Duan Gan skill prerequisites.",
+                "CHARACTERS: Ba Chang, Biao Di, Biao Ge, Chu Xin, Duan Gan, Xiao Daoshi, Da Shixiong, Yaxuo, Shi Xing Diao, Louya Zhi Wang.",
+                "MERCHANT: "..tostring(ext.merchantTracker.announcedKind or "none announced").." | "..tostring(ext.merchantTracker.island or "island unknown")}
+            roadmapStatus.Text=table.concat(lines,"\n")
+            local remaining=ext.merchantTracker.expiresAt and math.max(0,math.floor(ext.merchantTracker.expiresAt-os.clock())) or nil
+            local nextSpawn=ext.merchantTracker.nextSpawnAt and math.max(0,math.floor(ext.merchantTracker.nextSpawnAt-os.clock())) or nil
+            merchantGuide.Text="Roaming merchant: 50/50 Taoist or Maoshan. Reported cycle: every 30 min, visible for 10 min.\nTaoist guide: Rod 100M / Apex Eagle Hunt 300M / Orb 100M. Maoshan guide: Rod 300M / River Suppression 200M / Orb 200M. These are Discord-guide prices, not verified live prices.\nLast announcement: "..tostring(ext.merchantTracker.announcement).."\nDetected: Taoist "..(ext.merchantTracker.Taoist and "YES" or "no").." / Maoshan "..(ext.merchantTracker.Maoshan and "YES" or "no")..(remaining and ("\nReported window remaining: "..remaining.."s") or "")
+                ..(nextSpawn and ("\nNext reported spawn estimate: "..nextSpawn.."s") or "")
+        end
         hub.ui.statusBottom.Text=lastAction
         hub.bubbleDot.BackgroundColor3=(state.autoLevel or state.autoCast) and hub.ui.colors.accent or hub.ui.colors.muted
         hub.ui.reelStatusHUD.Text="BAR GUARD: "..barGuard.status
@@ -5744,7 +5890,7 @@ task.spawn(function()
             hub.ui.headerSubtitle.Text="FISHING  /  "..barGuard.status
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.gold
         else
-            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.1"
+            hub.ui.headerSubtitle.Text="HEAVYWEIGHT  /  2.9.2"
             hub.ui.headerSubtitle.TextColor3=hub.ui.colors.muted
         end
         hub.ui.levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -5774,6 +5920,8 @@ task.spawn(function()
             hub.ui.merchantButtons[name].Visible=available and state.merchantAlerts
             merchantActive=merchantActive or available
         end
+        local announced=ext.merchantTracker.expiresAt and os.clock()<ext.merchantTracker.expiresAt
+        merchantActive=merchantActive or announced==true
         hub.ui.roamingPopup.Visible=merchantActive and state.merchantAlerts
         local nextRodLabel=suggested and (suggested.name.." ("..suggested.power.." Power, "..suggested.cost.." Cash"..(suggested.verifiedPrice and ", live)" or ", estimate; verify in shop)")) or "Complete"
         local routeNow,nextIsland,requiredPower,nextTarget=hub.nextIslandGoal(p)
@@ -5792,7 +5940,7 @@ task.spawn(function()
     end
 end)
 
-report("KITKIT v2.9.1 ready. Route progression no longer demotes on dry spells; next rod gates are explicit.")
+report("KITKIT v2.9.2 ready. Progression roadmap and roaming merchant detection enabled. Route progression no longer demotes on dry spells; next rod gates are explicit.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
