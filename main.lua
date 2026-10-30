@@ -1,9 +1,10 @@
 --[[
-KITKIT HUB v2.2 | Heavyweight Fishing (Roblox, place 98502499119821)
+KITKIT HUB v2.3 | Heavyweight Fishing (Roblox, place 98502499119821)
 Original, inspectable Luau client script. No external library, key, webhook,
-remote loader, unknown purchases, auto-craft, paid summon or auto-roll calls.
-AUTO LEVEL is a best-effort rod-aware farming assistant, NOT an XP/level bypass.
-Rod purchases require manual confirmation in-game. Live behavior is untested.
+remote loader, speculative purchase remotes, auto-craft, paid summons or auto-rolls.
+AUTO LEVEL is a best-effort farming assistant, NOT an XP/level bypass.
+Rod buying uses game UI ONLY, targets one shop rod per island, and verifies ownership.
+UI access and purchases are not guaranteed. Live behavior is untested.
 
 Research references (mechanics / event names, not code copied):
   https://github.com/NoahTyrant/StarCrow/blob/main/Heavyweigh%20Fishing
@@ -49,6 +50,7 @@ env.KITKIT_HeavyweightFishing = hub
 
 local state = {
     autoLevel = false, autoRoute = true, autoFavorite = true,
+    autoBuyRod = true, autoSeaFacing = true,
     autoCodes = true, autoDailyQuest = true,
     fastSell = false, targetLevel = 500,
     autoCast = false, autoReel = false, lockBar = false,
@@ -98,6 +100,12 @@ local recoveryAttempts = 0
 local catchesThisSession = 0
 local lastBagSize = nil
 local progressionStatus = "Idle"
+local sellTracker = {status="Not attempted", attempts=0, confirmed=0, failed=0, pending=nil, lastResult=0,
+    streak=0, buyerPhase="idle", buyerAt=0, lastBuyerTrip=0, returnCF=nil}
+local facingTracker = {status="Waiting", checks=0, verified=0, fallbacks=0, lastAt=0, corrected=0, island="", failedCasts=0}
+local rodShop = {phase="idle", status="Waiting to save", target=nil, phaseAt=0,
+    lastVisit=0, untilAt=0, savedReturn=nil, clicks=0, cashBefore=nil, lastShopTarget="",
+    failures={}, lastEquipAt=0}
 local lastRhythm = 0
 local lastPhase2 = 0
 local lastSpeed = 0
@@ -119,6 +127,24 @@ local ISLANDS = {
     {"World Angler Isle", -2345.67, 9.28, -203.65},
     {"Weather Isle", -2886.12, 6.76, 1199.79},
     {"Mystic Reef Isle", -2561.58, 9.28, -1288.64},
+}
+-- v2.3: retain the sea-facing orientation from the public StarCrow island
+-- farm CFrames. v2.2 accidentally copied coordinates but dropped this rotation.
+-- The sea raycast below validates and adjusts this orientation when possible.
+local FARM_CFRAMES = {
+    ["Beginning Isle"] = CFrame.new(-297.48,9.28,58.78, 0,0,1, 0,1,0, -1,0,0),
+    ["Bamboo Isle"] = CFrame.new(-1310.04,9.28,29.79, -0.28,0,0.96, 0,1,0, -0.96,0,-0.28),
+    ["Fallout Isle"] = CFrame.new(76.47,9.28,1265.92, -1,0,0.01, 0,1,0, -0.01,0,-1),
+    ["Sovereign Isle"] = CFrame.new(-1254.18,9.28,1301.79, -1,0,-0.07, 0,1,0, 0.07,0,-1),
+    ["Perch Isle"] = CFrame.new(-38.55,9.28,-1343.82, 0.99,0,-0.12, 0,1,0, 0.12,0,0.99),
+    ["Frost Isle"] = CFrame.new(-1348.71,9.28,-1446.51, -1,0,-0.03, 0,1,0, 0.03,0,-1),
+    ["Coconut Isle"] = CFrame.new(1431,9.28,-1430.22, -0.17,0,0.98, 0,1,0, -0.98,0,-0.17),
+    ["Amber Isle"] = CFrame.new(1122.07,9.28,1414.54, 0.03,0,1, 0,1,0, -1,0,0.03),
+    ["Battlefield Isle"] = CFrame.new(1249.73,19.56,68.87, 0.01,0,1, 0,1,0, -1,0,0.01),
+    ["Mistpeak Isle"] = CFrame.new(2549.02,9.28,-80.77, -0.03,0,1, 0,1,0, -1,0,-0.03),
+    ["World Angler Isle"] = CFrame.new(-2345.67,9.28,-203.65, -0.09,0,-1, 0,1,0, 1,0,-0.09),
+    ["Weather Isle"] = CFrame.new(-2886.12,6.76,1199.79, -0.04,0,-1, 0,1,0, 1,0,-0.04),
+    ["Mystic Reef Isle"] = CFrame.new(-2561.58,9.28,-1288.64, -0.07,0,-1, 0,1,0, 1,0,-0.07),
 }
 local BOSS_POS = {
     Enzo = CFrame.new(-114.81, 9.28, 1356.67),
@@ -158,6 +184,7 @@ local function fire(name, ...)
     return pcall(function(...) ev:FireServer(...) end, ...)
 end
 local function cframeIsland(name)
+    if FARM_CFRAMES[name] then return FARM_CFRAMES[name] end
     for _, data in ipairs(ISLANDS) do
         if data[1] == name then return CFrame.new(data[2], data[3], data[4]) end
     end
@@ -169,6 +196,79 @@ local function teleportTo(cf, name)
     local ok = pcall(function() root.CFrame = cf end)
     if ok then report("Teleported to " .. tostring(name or "target")) end
     return ok
+end
+-- Check several points in front of the dock. Raycasts are advisory because
+-- some servers render water with non-queryable meshes, so retain the trusted
+-- per-island orientation if none of the directions can be verified.
+local function flatUnit(v)
+    local flat=Vector3.new(v.X,0,v.Z)
+    if flat.Magnitude<0.001 then return Vector3.new(0,0,-1) end
+    return flat.Unit
+end
+local SEA_DISTANCES={35,65,95}
+local SEA_ANGLES={0, -24, 24, -50, 50, -85, 85, 180}
+local function waterAhead(pos,dir,char)
+    local score=0
+    local rayParams=RaycastParams.new()
+    rayParams.FilterType=Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances=char and {char} or {}
+    rayParams.IgnoreWater=false
+    local ocean=workspace:FindFirstChild("Ocean")
+    for _,dist in ipairs(SEA_DISTANCES) do
+        local from=pos+dir*dist+Vector3.new(0,32,0)
+        local ok,result=pcall(function()
+            return workspace:Raycast(from,Vector3.new(0,-155,0),rayParams)
+        end)
+        if ok and result then
+            local part=result.Instance
+            local n=part and part.Name:lower() or ""
+            if result.Material==Enum.Material.Water
+                or (part and ocean and part:IsDescendantOf(ocean) and n:find("water",1,true))
+                or n=="water" then
+                score=score+1
+            end
+        end
+    end
+    return score
+end
+local function faceSea(island,force)
+    if not state.autoSeaFacing then return true end
+    local _,root,hum=getChar()
+    if not root or not hum or hum.Health<=0 then return false end
+    local target=cframeIsland(island)
+    if not target then return true end
+    if (root.Position-target.Position).Magnitude>185 then return true end
+    local now=os.clock()
+    if not force and facingTracker.island==island and now-facingTracker.lastAt<2.5 then return true end
+    facingTracker.lastAt=now
+    facingTracker.island=island
+    facingTracker.checks=facingTracker.checks+1
+    local base=flatUnit(target.LookVector)
+    local bestDir,bestScore=base,-1
+    for _,degrees in ipairs(SEA_ANGLES) do
+        local dir=flatUnit(CFrame.fromAxisAngle(Vector3.new(0,1,0),math.rad(degrees)):VectorToWorldSpace(base))
+        local score=waterAhead(root.Position,dir,root.Parent)
+        -- Prefer the original, tested dock heading when water scores tie.
+        local weighted=score*10-math.abs(degrees)/38
+        if weighted>bestScore then bestScore=weighted; bestDir=dir end
+    end
+    local verified=waterAhead(root.Position,bestDir,root.Parent)>0
+    if not verified then
+        bestDir=base
+        facingTracker.fallbacks=facingTracker.fallbacks+1
+        facingTracker.status="Reference heading (water not raycastable)"
+    else
+        facingTracker.verified=facingTracker.verified+1
+        facingTracker.status="Sea detected: "..island
+    end
+    local forward=flatUnit(root.CFrame.LookVector)
+    if forward:Dot(bestDir)<0.975 then
+        local here=root.Position
+        local ok=pcall(function() root.CFrame=CFrame.lookAt(here,here+bestDir) end)
+        if ok then facingTracker.corrected=facingTracker.corrected+1 end
+        return ok
+    end
+    return true
 end
 local function minigame()
     local main = PlayerGui:FindFirstChild("MainGui")
@@ -423,25 +523,56 @@ local function routeChoice(p)
     end
     return LEVEL_ROUTE[index].name,power,index
 end
+-- Only the strongest practical cash-buyable target per island. No intermediate shop rods.
+-- Quest-only Cryo Gravity and Soul Thorn require quests. The cash ladder
+-- instead selects Inferno Gravity and Thunder Thorn until quests are done.
+-- Perch: Diamond Spine is chosen ONLY when the live game module confirms it
+-- has more Power than Platinum; otherwise skip the redundant 4M purchase.
+-- Quest/crafted rods are not guessed as cash purchases.
+local ROD_LADDER={
+    {name="Enchanted Steel Rod",fallbackPower=19, cost=2000,island="Beginning Isle"},
+    {name="Shadow Rod",fallbackPower=29, cost=60000,island="Bamboo Isle"},
+    {name="Golden Rod",fallbackPower=35, cost=200000,island="Fallout Isle"},
+    {name="Inferno Rod",fallbackPower=48, cost=1500000,island="Sovereign Isle"},
+    {name="Platinum Spine Rod",fallbackPower=54, cost=3000000,island="Perch Isle"},
+    {name="Inferno Gravity Rod",fallbackPower=62, cost=7000000,island="Frost Isle"},
+    {name="Thunder Thorn Rod",fallbackPower=67, cost=10000000,island="Coconut Isle"},
+    {name="Starlight Rod",fallbackPower=83, cost=60000000,island="Amber Isle"},
+}
+local function shopPrice(rod,fallback)
+    local data=itemModule(rod)
+    if data and not data.Ingredient then
+        for _,key in ipairs({"Price","CashPrice","Cost","BuyPrice"}) do
+            local val=tonumber(data[key])
+            if val and val>0 and val<1e12 then return val,true end
+        end
+    end
+    return fallback,false
+end
+local function perIslandTarget(entry)
+    if entry.island=="Perch Isle" then
+        local platinum=rodPower("Platinum Spine Rod") or 54
+        local diamondData=itemModule("Diamond Spine Rod")
+        local diamond=diamondData and tonumber(diamondData.Power or diamondData.Strength or diamondData.MaxPower)
+        if diamond and diamond>platinum then
+            local cost,live=shopPrice("Diamond Spine Rod",4000000)
+            return {name="Diamond Spine Rod",power=diamond,cost=cost,island=entry.island,
+                verifiedPrice=live}
+        end
+    end
+    local cost,live=shopPrice(entry.name,entry.cost)
+    return {name=entry.name,power=rodPower(entry.name) or entry.fallbackPower,
+        cost=cost,island=entry.island,verifiedPrice=live,
+        mayRequireQuest=entry.mayRequireQuest}
+end
 local function nextRodSuggestion(p)
     p=p or profile()
-    local power=rodPower(p.rod) or 0
-    -- Cost-aware stepping stones from the August 2026 community rod catalog.
-    -- Skips the 4M Diamond Spine (same 54 Power/25 Luck as 3M Platinum).
-    -- Shop prices are advisory until verified in the player's actual server.
-    local candidates={
-        {name="Steel Rod",power=17,cost=1000,island="Beginning Isle"},
-        {name="Enchanted Steel Rod",power=19,cost=2000,island="Beginning Isle"},
-        {name="Shadow Rod",power=29,cost=60000,island="Bamboo Isle"},
-        {name="Golden Rod",power=35,cost=200000,island="Fallout Isle"},
-        {name="Grandmaster Golden Rod",power=45,cost=1000000,island="Sovereign Isle"},
-        {name="Platinum Spine Rod",power=54,cost=3000000,island="Perch Isle"},
-        {name="Cryo Gravity Rod",power=65,cost=8000000,island="Frost Isle"},
-        {name="Thunder Thorn Rod",power=67,cost=10000000,island="Coconut Isle"},
-        {name="Starlight Rod",power=83,cost=60000000,island="Amber Isle"},
-    }
-    for _,item in ipairs(candidates) do
-        if item.power>power then return item end
+    local current=rodPower(p.rod) or 0
+    local ownedName,ownedPower=bestOwnedRod(p)
+    current=math.max(current,ownedPower or 0)
+    for _,tier in ipairs(ROD_LADDER) do
+        local item=perIslandTarget(tier)
+        if item.power>current then return item end
     end
     return nil
 end
@@ -555,8 +686,15 @@ local function tryFavorite(item)
 end
 local function maySell()
     local inv,count,maximum=getInventory()
-    if not inv then return false,"Inventory data unavailable" end
-    if not count or count==0 then return false,"Nothing to sell" end
+    -- For a fresh-account XP grind the game may omit replicated bag data.
+    -- A timed "All" attempt is still possible, but is marked UNVERIFIED.
+    if not inv then
+        if state.protectRare and not state.fastSell then
+            return false,"No inventory data to check rare fish"
+        end
+        return true,"Blind timed sale; inventory not replicated"
+    end
+    if count==0 then return false,"Nothing to sell" end
     if state.sellNearFull and (not maximum or maximum<=0 or count/maximum<0.88) then
         return false,"Bag below 88% or limit unknown"
     end
@@ -564,23 +702,55 @@ local function maySell()
         for _,item in ipairs(inv:GetChildren()) do
             if flaggedRare(item) and not isFavorite(item) then
                 tryFavorite(item)
-                return false,"Rare fish is NOT confirmed favorited: "..item.Name
+                return false,"Rare fish NOT confirmed favorite: "..item.Name
             end
         end
     end
     return true,"Ready"
 end
+local function checkSellResult()
+    local pending=sellTracker.pending
+    if not pending or os.clock()-pending.at<5 then return end
+    local _,count=getInventory()
+    local cash=profile().cash
+    local cashRaised=(pending.cash~=nil and cash~=nil and cash>pending.cash)
+    local bagShrunk=(pending.count~=nil and count~=nil and count<pending.count)
+    if cashRaised or bagShrunk then
+        sellTracker.confirmed=sellTracker.confirmed+1
+        sellTracker.streak=0
+        sellTracker.status="CONFIRMED: "..(cashRaised and "Cash increased" or "bag decreased")
+    elseif (pending.cash==nil or cash==nil) and (pending.count==nil or count==nil) then
+        sellTracker.status="UNVERIFIED: game data unavailable"
+    else
+        sellTracker.failed=sellTracker.failed+1
+        sellTracker.streak=sellTracker.streak+1
+        sellTracker.status="UNCONFIRMED: no visible Cash/bag change"
+    end
+    sellTracker.lastResult=os.clock()
+    sellTracker.pending=nil
+end
 local function sellNow(skipNearFull)
+    if sellTracker.pending then return false end
     local original=state.sellNearFull
     if skipNearFull then state.sellNearFull=false end
     local ok,reason=maySell()
     state.sellNearFull=original
     if not ok then
-        if skipNearFull or not reason:find("Nothing to sell",1,true) then report("Sale paused: "..reason) end
+        sellTracker.status="Blocked: "..reason
+        if skipNearFull and not reason:find("Nothing to sell",1,true) then report(sellTracker.status) end
         return false
     end
+    local _,count=getInventory()
+    local cash=profile().cash
     local sent=fire("SellFish","All")
-    if sent then report("Sell request SENT. Check actual Cash or bag count for confirmation.") end
+    if sent then
+        sellTracker.attempts=sellTracker.attempts+1
+        sellTracker.status="Sent to server; awaiting verification"
+        sellTracker.pending={at=os.clock(),count=count,cash=cash}
+        report("Sell All sent; checking whether Cash or bag count changes.")
+    else
+        sellTracker.status="SellFish remote unavailable or errored"
+    end
     return sent
 end
 
@@ -682,6 +852,387 @@ local function startBoss(name)
     return started
 end
 
+-- v2.3 guarded UI-driven rod purchasing. We do not guess/forge an
+-- undocumented purchase RemoteEvent or invoke a random remote with Cash.
+-- The in-game shop must expose an exact matching rod name and Buy button.
+local function isShopping()
+    return rodShop.phase~="idle" and rodShop.phase~="cooldown"
+end
+local function ownedRod(name,p)
+    p=p or profile()
+    local inv=p.data and p.data:FindFirstChild("FishingRodInventory")
+    return inv and inv:FindFirstChild(name)~=nil or false
+end
+local function cleanName(txt)
+    return tostring(txt or ""):lower():gsub("[^%w]","")
+end
+local function guiVisible(obj)
+    local cur=obj
+    while cur and cur~=PlayerGui do
+        if cur:IsA("ScreenGui") and not cur.Enabled then return false end
+        if cur:IsA("GuiObject") and not cur.Visible then return false end
+        cur=cur.Parent
+    end
+    return cur==PlayerGui
+end
+local function buttonActionText(btn)
+    local words={btn.Name}
+    if btn:IsA("TextButton") then table.insert(words,btn.Text) end
+    for _,x in ipairs(btn:GetDescendants()) do
+        if x:IsA("TextLabel") then table.insert(words,x.Text) end
+    end
+    return table.concat(words," "):lower()
+end
+local function actionButtonForRod(name,action)
+    local gui=PlayerGui:FindFirstChild("MainGui")
+    if not gui then return nil end
+    local wanted=cleanName(name)
+    local matching={}
+    for _,obj in ipairs(gui:GetDescendants()) do
+        if guiVisible(obj) and obj:IsA("GuiObject") then
+            local shown=(obj:IsA("TextLabel") or obj:IsA("TextButton")) and obj.Text or obj.Name
+            local norm=cleanName(shown)
+            if norm==wanted or (norm:sub(1,#wanted)==wanted
+                and #norm-#wanted<=18) then table.insert(matching,obj) end
+        end
+    end
+    local best,bestDepth=nil,1e9
+    for _,match in ipairs(matching) do
+        local ancestor=match
+        for depth=0,4 do
+            if not ancestor or ancestor==gui then break end
+            -- Never click a generic Buy button from an entire multi-rod
+            -- shop page; only use the exact rod's local item/card hierarchy.
+            local unrelated=0
+            for _,node in ipairs(ancestor:GetDescendants()) do
+                if node:IsA("TextLabel") and node~=match then
+                    if ROD_POWER[node.Text] and cleanName(node.Text)~=wanted then
+                        unrelated=unrelated+1
+                        break
+                    end
+                end
+            end
+            for _,btn in ipairs(ancestor:GetDescendants()) do
+                if unrelated==0 and depth<=3 and btn:IsA("GuiButton") and guiVisible(btn) then
+                    local caption=buttonActionText(btn)
+                    local isBuy=caption:find("buy",1,true) or caption:find("purchase",1,true)
+                    local isEquip=caption:find("equip",1,true) or caption:find("use",1,true)
+                    if (action=="buy" and isBuy) or (action=="equip" and isEquip) then
+                        if depth<bestDepth then best=btn;bestDepth=depth end
+                    end
+                end
+            end
+            if bestDepth==depth then break end
+            ancestor=ancestor.Parent
+        end
+    end
+    return best
+end
+local function clickGameButton(btn,secondMethod)
+    if not btn or not guiVisible(btn) then return false end
+    if not secondMethod then
+        local ok=pcall(function() btn:Activate() end)
+        if ok then return true end
+    end
+    local ok=pcall(function()
+        local center=btn.AbsolutePosition+btn.AbsoluteSize/2
+        local vim=game:GetService("VirtualInputManager")
+        vim:SendMouseButtonEvent(center.X,center.Y,0,true,game,0)
+        task.delay(0.06,function()
+            if hub.running then
+                pcall(function() vim:SendMouseButtonEvent(center.X,center.Y,0,false,game,0) end)
+            end
+        end)
+    end)
+    return ok
+end
+local function findInventoryNavigation()
+    local gameGui=PlayerGui:FindFirstChild("MainGui")
+    if not gameGui then return nil end
+    for _,btn in ipairs(gameGui:GetDescendants()) do
+        if btn:IsA("GuiButton") and guiVisible(btn) then
+            local n=cleanName(btn.Name)
+            local label=cleanName(buttonActionText(btn))
+            if n=="inventory" or n=="openinventory" or n=="inventorybutton"
+                or n=="rods" or label=="inventory" or label=="rods" then
+                return btn
+            end
+        end
+    end
+    return nil
+end
+local function findRodVendor()
+    local from=cframeIsland(rodShop.target and rodShop.target.island or "Beginning Isle")
+    local best,bestDist=nil,math.huge
+    for _,folderName in ipairs({"NPC","NPCs","Merchant","NPCDialogue"}) do
+        local folder=workspace:FindFirstChild(folderName)
+        if folder then
+            for _,obj in ipairs(folder:GetDescendants()) do
+                local n=cleanName(obj.Name)
+                if n=="biaodi" or n=="rodseller" or n=="buyfishingrod" then
+                    local p=getPart(obj)
+                    if p then
+                        local dist=from and (p.Position-from.Position).Magnitude or 0
+                        if dist<bestDist and dist<450 then best,bestDist=obj,dist end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+-- Some servers accept SellFish from anywhere; others may reject it away
+-- from Nana, the Fish Buyer. Travel after repeated unconfirmed sales
+-- (or one failure when the bag is nearly full),
+-- verify again at close range and return to the saved fishing location.
+local function buyerTripActive()
+    return sellTracker.buyerPhase~="idle"
+end
+local function findFishBuyer()
+    local _,root=getChar()
+    if not root then return nil end
+    local best,bestDistance=nil,math.huge
+    for _,folderName in ipairs({"NPC","NPCs","Merchant","NPCDialogue"}) do
+        local folder=workspace:FindFirstChild(folderName)
+        if folder then
+            for _,obj in ipairs(folder:GetDescendants()) do
+                local n=cleanName(obj.Name)
+                -- Nana is the actual fish buyer; Biao Ge sets spawn and is NOT a buyer.
+                if n=="nana" or n=="sellfish" or n=="fishbuyer" then
+                    local part=getPart(obj)
+                    if part then
+                        local dist=(part.Position-root.Position).Magnitude
+                        if dist<bestDistance and dist<400 then
+                            best,bestDistance=part,dist
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+local function buyerTick()
+    local now=os.clock()
+    local _,root,hum=getChar()
+    if not root or not hum or hum.Health<=0 then return end
+    if sellTracker.buyerPhase=="idle" then
+        if not state.autoSell or isShopping() or sellTracker.pending
+            or now-sellTracker.lastBuyerTrip<120 then return end
+        local _,count,maximum=getInventory()
+        local bagNearlyFull=count and maximum and maximum>0 and count>=maximum-1
+        -- If the bag is blocking XP, try Nana after ONE unsuccessful remote.
+        if sellTracker.streak<2 and not (bagNearlyFull and sellTracker.streak>=1) then return end
+        local _,active=minigame()
+        if not count or count<1 or active then return end
+        local buyer=findFishBuyer()
+        sellTracker.lastBuyerTrip=now
+        if not buyer then
+            sellTracker.status="No nearby Fish Buyer loaded (direct selling unconfirmed)"
+            return
+        end
+        sellTracker.returnCF=root.CFrame
+        sellTracker.buyerPhase="travel"
+        sellTracker.buyerAt=now
+        sellTracker.prompted=false
+        teleportTo(buyer.CFrame*CFrame.new(0,0,-5),"Nana / Fish Buyer recovery")
+        sellTracker.status="At Fish Buyer: retrying sale"
+        return
+    end
+    if sellTracker.buyerPhase=="travel" and now-sellTracker.buyerAt>=1.3 then
+        if sellTracker.pending then return end
+        if not sellTracker.prompted then
+            sellTracker.prompted=true
+            local buyer=findFishBuyer()
+            local obj=buyer and buyer.Parent
+            local prompt=obj and obj:FindFirstChildWhichIsA("ProximityPrompt",true)
+            if prompt and prompt.Enabled and type(fireproximityprompt)=="function" then
+                local ok=pcall(function() fireproximityprompt(prompt) end)
+                if ok then
+                    sellTracker.status="Interacting with Nana before sale"
+                    sellTracker.buyerAt=now
+                    sellTracker.buyerPhase="settle"
+                    return
+                end
+            end
+        end
+        sellTracker.buyerPhase="settle"
+        sellTracker.buyerAt=now-1
+    end
+    if sellTracker.buyerPhase=="settle" and now-sellTracker.buyerAt>=0.8 then
+        if sellNow(true) then
+            sellTracker.buyerPhase="verify"
+            sellTracker.buyerAt=now
+        else
+            sellTracker.buyerPhase="return"
+        end
+    end
+    if sellTracker.buyerPhase=="verify" and sellTracker.pending==nil then
+        sellTracker.buyerPhase="return"
+    end
+    if now-sellTracker.buyerAt>14 then sellTracker.buyerPhase="return" end
+    if sellTracker.buyerPhase=="return" then
+        local returnCF=sellTracker.returnCF
+        sellTracker.returnCF=nil
+        sellTracker.buyerPhase="idle"
+        sellTracker.streak=0
+        if returnCF then teleportTo(returnCF,"resume fishing"); facingTracker.lastAt=0 end
+    end
+end
+
+local function finishRodShop(reason,delay)
+    rodShop.status=reason
+    rodShop.lastShopTarget=rodShop.target and rodShop.target.name or ""
+    if rodShop.target and (reason:find("did not",1,true)
+        or reason:find("Cannot",1,true) or reason:find("unverified",1,true)) then
+        local n=rodShop.target.name
+        rodShop.failures[n]=(rodShop.failures[n] or 0)+1
+    end
+    rodShop.lastVisit=os.clock()
+    rodShop.untilAt=os.clock()+(delay or 65)
+    rodShop.phase="cooldown"
+    rodShop.target=nil
+    rodShop.clicks=0
+    local pos=rodShop.savedReturn
+    rodShop.savedReturn=nil
+    if pos and hub.running then
+        local _,root=getChar()
+        local _,active=minigame()
+        if root and not active then
+            teleportTo(pos,"return to fishing")
+            facingTracker.lastAt=0
+        end
+    end
+    report("Rod shop: "..reason)
+end
+local function shopTick()
+    if not hub.running or not state.autoLevel or not state.autoBuyRod then return end
+    local now=os.clock()
+    local p=profile()
+    if rodShop.phase=="cooldown" then
+        if now<rodShop.untilAt then return end
+        rodShop.phase="idle"
+    end
+    local _,active=minigame()
+    local char,root,hum=getChar()
+    if not root or not hum or hum.Health<=0 then return end
+    if rodShop.phase=="idle" then
+        if buyerTripActive() or sellTracker.pending or active or char:GetAttribute("Fishing") then return end
+        local owned,power=bestOwnedRod(p)
+        if power and power>(rodPower(p.rod) or 0) then
+            rodShop.status="Equip already-owned rod: "..owned
+            if now-rodShop.lastEquipAt>=15 then
+                local equipBtn=actionButtonForRod(owned,"equip")
+                local nav=not equipBtn and findInventoryNavigation() or nil
+                if equipBtn then
+                    clickGameButton(equipBtn)
+                    rodShop.status="Equip pressed for "..owned.."; checking data"
+                elseif nav then
+                    clickGameButton(nav)
+                    rodShop.status="Opening inventory for "..owned
+                else
+                    rodShop.status="Owned "..owned.."; equip in Inventory if needed"
+                end
+                rodShop.lastEquipAt=now
+            end
+            return
+        end
+        local target=nextRodSuggestion(p)
+        if not target then rodShop.status="All shop targets passed";return end
+        if not p.cash or p.cash<target.cost then
+            rodShop.status="Saving for "..target.name.." ("..tostring(target.cost).." Cash)"
+            return
+        end
+        if ownedRod(target.name,p) then return end
+        if (rodShop.failures[target.name] or 0)>=2 then
+            rodShop.status="Shop UI failed twice for "..target.name.."; manual purchase needed"
+            return
+        end
+        rodShop.target=target
+        rodShop.savedReturn=root.CFrame
+        rodShop.phase="travel"
+        rodShop.phaseAt=now
+        rodShop.clicks=0
+        rodShop.status="Traveling to "..target.island.." Rod Seller"
+    end
+    local target=rodShop.target
+    if not target then finishRodShop("Missing rod target",90); return end
+    if (rodPower(p.rod) or 0)>=target.power or ownedRod(target.name,p) then
+        local equip=actionButtonForRod(target.name,"equip")
+        if equip then clickGameButton(equip) end
+        finishRodShop("Owned "..target.name.."; "
+            ..(equip and "Equip clicked" or "open Inventory to equip"),25)
+        return
+    end
+    if now-rodShop.phaseAt>57 then
+        finishRodShop("Shop UI did not complete "..target.name.."; manual check needed",120)
+        return
+    end
+    if rodShop.phase=="travel" then
+        local islandCF=cframeIsland(target.island)
+        if islandCF and (root.Position-islandCF.Position).Magnitude>160 then
+            teleportTo(islandCF,target.island.." rod shop")
+            return
+        end
+        rodShop.phase="open"
+        rodShop.phaseAt=now
+        rodShop.status="Opening Rod Seller for "..target.name
+        return
+    end
+    if rodShop.phase=="open" then
+        if not p.cash or p.cash<target.cost then
+            finishRodShop("Insufficient Cash for "..target.name.."; no purchase",60)
+            return
+        end
+        local buy=actionButtonForRod(target.name,"buy")
+        if buy then
+            -- One button interaction, then WAIT for server-owned data.
+            rodShop.clicks=rodShop.clicks+1
+            local ok=clickGameButton(buy,rodShop.clicks>=2)
+            rodShop.cashBefore=p.cash
+            rodShop.phase="pending"
+            rodShop.phaseAt=now
+            rodShop.status=ok and ("Buy clicked: "..target.name.."; verifying ownership")
+                or ("Shop button could not activate: "..target.name)
+            if not ok then finishRodShop("Cannot activate shop Buy button",120) end
+            return
+        end
+        local vendor=findRodVendor()
+        if not vendor then
+            rodShop.status="Waiting for Rod Seller NPC to stream in"
+            return
+        end
+        local part=getPart(vendor)
+        if part and (root.Position-part.Position).Magnitude>10 then
+            teleportTo(part.CFrame*CFrame.new(0,0,-5),"Rod Seller")
+            return
+        end
+        if now-rodShop.lastVisit>3 then
+            local prompt=vendor:FindFirstChildWhichIsA("ProximityPrompt",true)
+            if prompt and type(fireproximityprompt)=="function" then
+                rodShop.lastVisit=now
+                pcall(function() fireproximityprompt(prompt) end)
+                rodShop.status="Interacting with "..target.island.." Rod Seller"
+            else
+                rodShop.status="Open Rod Seller manually: shop prompt not available"
+            end
+        end
+        return
+    end
+    if rodShop.phase=="pending" and now-rodShop.phaseAt>8 then
+        if p.cash and rodShop.cashBefore and p.cash<rodShop.cashBefore then
+            finishRodShop("Cash changed but rod ownership unverified; STOPPED retries",180)
+            return
+        end
+        if rodShop.clicks>=2 then
+            finishRodShop("Buy UI did not confirm ownership; STOPPED retries",180)
+        else
+            rodShop.phase="open"
+            rodShop.phaseAt=now
+            rodShop.status="Retrying UI click once via input event"
+        end
+    end
+end
 -- GUI creation. Built with Roblox instances; no remote UI code.
 local container = PlayerGui
 pcall(function()
@@ -730,7 +1281,7 @@ local title = make("TextLabel", header, {
     Position = UDim2.fromOffset(14, 5), Size = UDim2.new(1, -107, 0, 24),
 })
 local headerSubtitle = make("TextLabel", header, {
-    BackgroundTransparency = 1, Text = "v2.2 | manual rod upgrades | bar guard", TextXAlignment = Enum.TextXAlignment.Left,
+    BackgroundTransparency = 1, Text = "v2.3 | sea facing | shop | sell", TextXAlignment = Enum.TextXAlignment.Left,
     Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = colors.muted,
     Position = UDim2.fromOffset(14, 28), Size = UDim2.new(1, -107, 0, 16),
 })
@@ -960,7 +1511,7 @@ local routeHUD=make("TextLabel",levelPage,{
     BackgroundTransparency=1,TextColor3=colors.muted,
     TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,
     Font=Enum.Font.Gotham,TextSize=11,TextWrapped=true,
-    Text="Status: idle\nNext upgrade: --",Size=UDim2.new(1,-4,0,78),
+    Text="Status: idle\nNext upgrade: --",Size=UDim2.new(1,-4,0,145),
 })
 section(levelPage,"Fresh account: XP / cash farming")
 local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
@@ -971,8 +1522,10 @@ local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
             setState(k,true)
         end
         setState("sellNearFull",false)
-        setState("protectRare",true)
-        setState("fastSell",false)
+        -- Fresh-account economy mode: sell all fish for rod Cash; user can
+        -- turn protection back on in Fish tab if keeping rares matters.
+        setState("protectRare",false)
+        setState("fastSell",true)
         setState("autoFavorite",true)
         setState("autoEnzo",false)
         setState("autoLong",false)
@@ -982,17 +1535,26 @@ local levelBtn=action(levelPage,"START AUTO LEVEL TO 500",function(btn)
         lastProfileLevel=nil
         lastProfileXP=nil
         levelGained=0
-        progressionStatus="Started: checking profile and rod power"
-        report("Auto level started. Rod upgrades require your manual purchase at Biao Di.")
+        progressionStatus="Started: sea-facing, selling and Cash saving enabled"
+        report("Auto level started: selling all fish for Cash, one target rod per island. Turn on rare protection if wanted.")
     else
         for _,k in ipairs({"autoCast","autoReel","lockBar","autoSkill","slam","charge","rhythm","phase2","autoSell"}) do
             setState(k,false)
+        end
+        if isShopping() then finishRodShop("Stopped by user",0) end
+        if buyerTripActive() then
+            local returnCF=sellTracker.returnCF
+            sellTracker.buyerPhase="idle"
+            sellTracker.returnCF=nil
+            if returnCF then teleportTo(returnCF,"cancel buyer trip") end
         end
         report("Auto level stopped. Fishing automation and selling stopped.")
     end
     btn.Text=active and "STOP AUTO LEVEL" or "START AUTO LEVEL TO 500"
 end,true)
 toggle(levelPage,"Auto route based on equipped rod Power","autoRoute")
+toggle(levelPage,"Auto face sea before casting","autoSeaFacing")
+toggle(levelPage,"Auto shop one best rod per island (UI)","autoBuyRod")
 toggle(levelPage,"Auto claim eligible free codes","autoCodes")
 toggle(levelPage,"Auto claim completed daily quests","autoDailyQuest")
 toggle(levelPage,"Favorite rare fish before selling","autoFavorite")
@@ -1002,7 +1564,7 @@ end)
 stepper(levelPage,"Goal level","targetLevel",50,2000,50,"")
 stepper(levelPage,"Sell interval","sellDelay",15,300,15,"s")
 stepper(levelPage,"Cast recovery delay","castDelay",0.4,3,0.1,"s")
-section(levelPage,"Rod upgrades: manual for now")
+section(levelPage,"Rod shop: one target per island")
 action(levelPage,"FIND NEAREST ROD SELLER",function()
     local _,hrp=getChar()
     local npc=workspace:FindFirstChild("NPC")
@@ -1028,7 +1590,7 @@ action(levelPage,"SHOW NEXT ROD UPGRADE",function()
     if ownedPower and ownedPower>(rodPower(p.rod) or 0) then
         notify("You own a stronger rod: "..owned..". Equip it in-game.")
     elseif suggestion then
-        notify("Suggested next: "..suggestion.name.." on "..suggestion.island.." (~"..suggestion.cost.." Cash)")
+        notify("Saving for island target: "..suggestion.name.." ("..suggestion.cost.." Cash) on "..suggestion.island)
     else
         notify("No next rod suggestion. Check the live NPC shop.")
     end
@@ -1080,12 +1642,12 @@ toggle(fishPage, "Use Z skill", "skillZ")
 toggle(fishPage, "Use X skill", "skillX")
 toggle(fishPage, "Use C skill", "skillC")
 toggle(fishPage, "Use V skill", "skillV")
-section(fishPage, "Selling - separate, OFF by default")
+section(fishPage, "Selling - OFF unless Auto Level is started")
 toggle(fishPage, "AUTO SELL ALL (caution)", "autoSell", function(v)
     if v then notify("Auto Sell ON. Rare protection is best-effort, not guaranteed!") end
 end)
 toggle(fishPage, "Only sell when bag >= 88%", "sellNearFull")
-toggle(fishPage, "Protect UNFAVORITED rare fish", "protectRare")
+toggle(fishPage, "Protect rares (may pause all selling)", "protectRare")
 stepper(fishPage, "Sell interval", "sellDelay", 15, 1200, 15, "s")
 action(fishPage, "SELL ALL NOW - REQUIRES DOUBLE TAP", function(btn)
     local now = os.clock()
@@ -1237,9 +1799,9 @@ make("TextLabel", extraPage, {
     BackgroundTransparency = 1, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = colors.muted,
     Font = Enum.Font.Gotham, TextSize = 11,
-    Text = "No automatic Cash/Crystal purchases, crafting, summons, trait rerolls or gacha. "
-        .. "AUTO LEVEL requires manual rod upgrades; code redemption may fail. Rare protection is best-effort. "
-        .. "RightShift to hide. All features UNTESTED in the live game.",
+    Text = "Auto Level sells ALL fish to save for one rod per island. Rod buying uses only a matched in-game shop GUI. "
+        .. "No speculative purchase remotes, crystals, crafting, summons, trait rolls or gacha. "
+        .. "Protect rares manually if needed; code/quest/shop features can fail. Live behavior UNTESTED.",
     Size = UDim2.new(1, -4, 0, 80),
 })
 action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
@@ -1261,7 +1823,7 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
     end
     table.sort(dataNames)
     local lines={
-        "KITKIT HUB v2.2 REDACTED DIAGNOSTICS",
+        "KITKIT HUB v2.3 REDACTED DIAGNOSTICS",
         "Level="..tostring(p.level).." XP="..tostring(p.xp).." Cash="..tostring(p.cash),
         "Rod="..tostring(p.rod).." Power="..tostring(rodPower(p.rod)),
         "Bag="..tostring(count).."/"..tostring(maxCount),
@@ -1269,6 +1831,14 @@ action(extraPage,"COPY REDACTED FARM DIAGNOSTICS",function()
         reelDiagnostics(),
         "Known code attempts="..tostring((function() local n=0 for _ in pairs(codesAttempted) do n=n+1 end return n end)()),
         "Mode="..tostring(state.autoLevel).." State="..progressionStatus,
+        "Sea="..facingTracker.status.." Checks="..facingTracker.checks
+            .." Verified="..facingTracker.verified.." Adjusted="..facingTracker.corrected
+            .." FailedCasts="..facingTracker.failedCasts,
+        "Sales="..sellTracker.status.." Tries="..sellTracker.attempts
+            .." Verified="..sellTracker.confirmed.." Unconfirmed="..sellTracker.failed
+            .." BuyerTrip="..sellTracker.buyerPhase,
+        "Shop="..rodShop.status.." Phase="..rodShop.phase.." LastTarget="..rodShop.lastShopTarget,
+        "AutoBuy="..tostring(state.autoBuyRod).." SeaFacing="..tostring(state.autoSeaFacing),
         "Data child keys="..table.concat(dataNames,", "),
         "Event names="..table.concat(names,", "),
         "No username, user ID, passwords, executor keys, webhooks or URLs exported.",
@@ -1530,7 +2100,8 @@ local function progressionTick()
     else
         progressionStatus="Farming "..desired.." (Power "..power..")"
     end
-    if state.autoRoute and (now-lastAutoRoute>=18) then
+    if state.autoRoute and not isShopping() and not buyerTripActive()
+        and not sellTracker.pending and (now-lastAutoRoute>=12) then
         lastAutoRoute=now
         local _,root,hum=getChar()
         local _,active=minigame()
@@ -1538,6 +2109,7 @@ local function progressionTick()
         if root and hum and hum.Health>0 and not active and not root.Parent:GetAttribute("Fishing") and cf
             and (root.Position-cf.Position).Magnitude>230 then
             teleportTo(cf,desired)
+            facingTracker.lastAt=0
             lastCatchAt=now
         end
     end
@@ -1559,18 +2131,10 @@ local function progressionTick()
         lastCatchAt=now
     end
     local suggestion=nextRodSuggestion(p)
-    if suggestion then
-        local owned,pow=bestOwnedRod(p)
-        if pow and pow>(rodPower(p.rod) or 0) then
-            if lastRodPrompt~=("owned:"..owned) then
-                lastRodPrompt="owned:"..owned
-                notify("Equip your better owned rod: "..owned.." (Power "..pow..")")
-            end
-        elseif p.cash and p.cash>=suggestion.cost then
-            if lastRodPrompt~=("buy:"..suggestion.name) then
-                lastRodPrompt="buy:"..suggestion.name
-                notify("Upgrade available: buy "..suggestion.name.." at "..suggestion.island.."'s Rod Seller")
-            end
+    if suggestion and p.cash and p.cash>=suggestion.cost and not state.autoBuyRod then
+        if lastRodPrompt~=("buy:"..suggestion.name) then
+            lastRodPrompt="buy:"..suggestion.name
+            notify("Island target affordable: "..suggestion.name.." at "..suggestion.island)
         end
     end
 end
@@ -1609,14 +2173,35 @@ track(RunService.Heartbeat:Connect(function()
                 if hub.running then startBoss(state.autoLong and "Long Diaohai" or "Enzo") end
             end)
         end
-    elseif state.autoCast and char and now - lastCast > math.max(0.4, state.castDelay)
+    elseif state.autoCast and not isShopping() and not buyerTripActive()
+        and not sellTracker.pending and char and now - lastCast > math.max(0.4, state.castDelay)
         and now - lastFishingEnd > math.max(0.4, state.castDelay) then
-        lastCast = now
-        if char:GetAttribute("Type") ~= "Fishing Rod" then
+        local p=profile()
+        local island=routeChoice(p)
+        local root=char:FindFirstChild("HumanoidRootPart")
+        if not root then
+            lastCast=now
+        elseif state.autoSeaFacing and not faceSea(island,false) then
+            lastCast=now
+        elseif char:GetAttribute("Type")~="Fishing Rod" then
+            lastCast=now
             task.spawn(equipRod)
         elseif not char:GetAttribute("Fishing") then
-            local _, hrp = getChar()
-            if hrp then fire("Fishing", hrp.CFrame) end
+            lastCast=now
+            if fire("Fishing",root.CFrame) then
+                task.delay(2.1,function()
+                    if not hub.running or not state.autoCast or isShopping() then return end
+                    local c=LocalPlayer.Character
+                    local _,activeNow=minigame()
+                    if c==char and not activeNow and not c:GetAttribute("Fishing")
+                        and os.clock()-lastCast<=4 then
+                        facingTracker.failedCasts=facingTracker.failedCasts+1
+                        facingTracker.lastAt=0
+                        -- Rotate/revalidate again before the NEXT cast.
+                        facingTracker.status="Cast not confirmed; rechecking direction"
+                    end
+                end)
+            end
         end
     end
     if state.speedBoost and now - lastSpeed > 1 then
@@ -1687,23 +2272,26 @@ end))
 task.spawn(function()
     while hub.running do
         local now = os.clock()
+        checkSellResult()
+        if state.autoSell and not isShopping() then buyerTick() end
         local _, bagCount, bagMax = getInventory()
         local emergencySell = state.autoLevel and bagMax and bagMax>0
-            and bagCount and bagCount>=bagMax-2 and now-lastSell>=10
-        if state.autoSell and (now-lastSell>=state.sellDelay or emergencySell) then
-            lastSell = now
-            local ok, reason = maySell()
-            if ok then
-                local _,active=minigame()
-                if not active then sellNow(false) end
-            elseif reason:find("Rare fish",1,true) or reason:find("NOT confirmed",1,true) then
-                if now-lastAutoHealthCheck>45 then
+            and bagCount and bagCount>=bagMax-2 and now-lastSell>=12
+        if state.autoSell and not isShopping() and not buyerTripActive()
+            and not sellTracker.pending
+            and (now-lastSell>=state.sellDelay or emergencySell) then
+            local _,active=minigame()
+            if not active then
+                lastSell=now
+                local success=sellNow(false)
+                if not success and sellTracker.status:find("Rare",1,true)
+                    and now-lastAutoHealthCheck>45 then
                     lastAutoHealthCheck=now
-                    report("Auto-sell waiting: "..reason)
+                    report("Auto-sell: "..sellTracker.status)
                 end
             end
         end
-        if state.stayIsland and not state.autoEnzo and not state.autoLong and now - lastTP >= 5 then
+        if state.stayIsland and not isShopping() and not buyerTripActive() and not state.autoEnzo and not state.autoLong and now - lastTP >= 5 then
             lastTP = now
             local _, root = getChar()
             local _, active = minigame()
@@ -1715,6 +2303,18 @@ task.spawn(function()
         task.wait(1)
     end
 end)
+task.spawn(function()
+    while hub.running do
+        if state.autoBuyRod and state.autoLevel then
+            local ok,err=pcall(shopTick)
+            if not ok then
+                finishRodShop("Shop automation error: "..tostring(err),120)
+            end
+        end
+        task.wait(1.1)
+    end
+end)
+
 task.spawn(function()
     while hub.running do
         local b = scanBosses()
@@ -1733,13 +2333,13 @@ task.spawn(function()
             .." | Snaps "..barGuard.corrections
             .." | Reel requests "..reelRequests
         if state.autoLevel then
-            headerSubtitle.Text="v2.2 | LEVEL ACTIVE | "..barGuard.status
+            headerSubtitle.Text="v2.3 | LEVEL ON | "..barGuard.status
             headerSubtitle.TextColor3=colors.accent
         elseif state.autoCast or state.autoReel or state.lockBar then
-            headerSubtitle.Text="v2.2 | FISHING ACTIVE | "..barGuard.status
+            headerSubtitle.Text="v2.3 | FISHING ON | "..barGuard.status
             headerSubtitle.TextColor3=colors.gold
         else
-            headerSubtitle.Text="v2.2 | idle | bar guard ready"
+            headerSubtitle.Text="v2.3 | idle | sea guard ready"
             headerSubtitle.TextColor3=colors.muted
         end
         levelingHUD.Text="Lv "..tostring(p.level or "?").." / "..state.targetLevel
@@ -1748,13 +2348,14 @@ task.spawn(function()
             .." | "..string.format("%.1f",gainRate).." Lv/h"
         local suggested=nextRodSuggestion(p)
         routeHUD.Text="Status: "..progressionStatus
-            .."\nRoute: "..route.." | Catches since load: "..catchesThisSession
-            .."\nNext rod: "..(suggested and (suggested.name.." (~"..suggested.cost.." Cash)") or "Check live game")
+            .."\nSea: "..facingTracker.status.." | Sell: "..sellTracker.status
+            .."\nRod: "..rodShop.status
+            .."\nTarget: "..(suggested and (suggested.name.." ("..suggested.cost.." Cash)") or "Complete")
         task.wait(3)
     end
 end)
 
-notify("KITKIT HUB v2.2 loaded. Use LEVEL > START AUTO LEVEL TO 500. Bar guard is upgraded; check Fish tab status.")
+notify("KITKIT HUB v2.3 loaded. Auto Level sells all fish, checks sea facing, and attempts one rod per island through the in-game shop UI.")
 if state.fogAlert and (lastWeather:lower():find("fog", 1, true)
     or lastWeather:lower():find("mist", 1, true)) then
     task.delay(0.7, function()
